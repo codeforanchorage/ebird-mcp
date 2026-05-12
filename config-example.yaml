@@ -19,7 +19,7 @@ plugins:
     enabled: true                 # Must be true; the only plugin in this fork.
     api_key: "REPLACE_ME"         # eBird API key from https://ebird.org/api/keygen
     base_url: "https://api.ebird.org/v2"
-    timeout: 30                   # HTTP timeout in seconds (1-120)
+    timeout: 25                   # HTTP timeout in seconds; keep <= lambda_timeout-5 for clean errors
     default_max_results: 100      # Default if caller omits maxResults
     default_back: 14              # Default "back" (days) if caller omits — eBird hard-caps at 30
 

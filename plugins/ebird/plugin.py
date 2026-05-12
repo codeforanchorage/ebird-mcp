@@ -32,10 +32,14 @@ from plugins.ebird.ebird_client import EBirdClient
 
 logger = logging.getLogger(__name__)
 
+# Conservative retry budget. Two attempts max, ≤4 s backoff — fits well
+# inside Lambda's 30 s timeout with room to format and return a clean
+# error if both attempts fail. Only network errors and read timeouts
+# trigger a retry; 4xx (bad params) and 5xx (upstream broken) fall
+# through immediately to the caller.
 _RETRY = retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    # Only retry network errors and 5xx; never retry 4xx (bad params).
+    stop=stop_after_attempt(2),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
     retry=retry_if_exception_type((httpx.TransportError, httpx.ReadTimeout)),
 )
 
@@ -357,7 +361,7 @@ class EBirdPlugin(MCPPlugin):
                     hotspot=arguments.get("hotspot"),
                     detail=detail,
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_recent_observations_for_species":
                 data = await _RETRY(self.client.get_recent_observations_for_species)(
@@ -370,7 +374,7 @@ class EBirdPlugin(MCPPlugin):
                     include_provisional=arguments.get("includeProvisional"),
                     hotspot=arguments.get("hotspot"),
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_notable_observations":
                 data = await _RETRY(self.client.get_notable_observations)(
@@ -381,7 +385,7 @@ class EBirdPlugin(MCPPlugin):
                     ),
                     detail=detail,
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_nearby_observations":
                 data = await _RETRY(self.client.get_nearby_observations)(
@@ -395,7 +399,7 @@ class EBirdPlugin(MCPPlugin):
                     include_provisional=arguments.get("includeProvisional"),
                     hotspot=arguments.get("hotspot"),
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_nearby_notable_observations":
                 data = await _RETRY(self.client.get_nearby_notable_observations)(
@@ -407,7 +411,7 @@ class EBirdPlugin(MCPPlugin):
                         "maxResults", self.plugin_config.default_max_results
                     ),
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_nearby_observations_for_species":
                 data = await _RETRY(self.client.get_nearby_observations_for_species)(
@@ -421,7 +425,7 @@ class EBirdPlugin(MCPPlugin):
                     ),
                     include_provisional=arguments.get("includeProvisional"),
                 )
-                return _ok(_format_observations(data))
+                return _ok(_format_observations(data, self.plugin_config.include_observer_name))
 
             if tool_name == "get_hotspots":
                 data = await _RETRY(self.client.get_hotspots)(
@@ -575,7 +579,9 @@ def _ok(text: str) -> ToolResult:
 # ---- Output formatting ----------------------------------------------------
 
 
-def _format_observations(observations: List[Dict[str, Any]]) -> str:
+def _format_observations(
+    observations: List[Dict[str, Any]], include_observer: bool = False
+) -> str:
     if not observations:
         return "No observations found."
 
@@ -594,7 +600,7 @@ def _format_observations(observations: List[Dict[str, Any]]) -> str:
         )
         observer = (
             f"\nObserver: {obs['userDisplayName']}"
-            if obs.get("userDisplayName")
+            if include_observer and obs.get("userDisplayName")
             else ""
         )
         lines.append(
