@@ -10,11 +10,11 @@ Built by [Code for Anchorage](https://codeforanchorage.org), modeled on the [Ope
 
 ## Try it (no deploy needed)
 
-Code for Anchorage hosts a public instance at:
+Code for Anchorage runs a public instance:
 
-> **`https://ebird.codeforanchorage.org/mcp`**
+> **<https://ebird.codeforanchorage.org/mcp>**
 
-In Claude (web or desktop) → **Settings → Connectors → Add custom connector**, paste that URL, and you're done. Then ask:
+In Claude (web or desktop) → **Settings → Connectors → Add custom connector**, paste that URL, and you're done. The 10 eBird tools light up immediately. Then ask:
 
 - *"What's been seen at birding hotspots near Anchorage in the last 3 days?"*
 - *"Have any Snowy Owls been reported in Alaska this winter?"*
@@ -22,7 +22,18 @@ In Claude (web or desktop) → **Settings → Connectors → Add custom connecto
 - *"What's the scientific name for the eBird code 'amecro'? Any hybrids tracked for Mallards?"*
 - *"Find the top 10 hotspots in Southeast Alaska by species count."*
 
-Claude picks the right tool from the 10 below, calls eBird, and answers with real data.
+Claude picks the right tool, calls eBird, and answers in plain English with species, locations, observer counts, and timestamps.
+
+Prefer to verify it's up before adding a connector?
+
+```bash
+curl -sS https://ebird.codeforanchorage.org/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+# {"jsonrpc": "2.0", "id": 1, "result": {"status": "ok"}}
+```
+
+The public endpoint is rate-limited (currently 50,000 requests/day, 20 rps sustained per the production tfvars). If you expect heavy usage or want isolation from other users sharing the rate limits, deploy your own copy — instructions below.
 
 ## When you'd want to deploy your own copy
 
