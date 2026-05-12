@@ -7,6 +7,7 @@ of the upstream stdio reference server (`ebird-mcp-server`).
 import datetime as dt
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -16,6 +17,14 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+# Strict regexes for arguments that flow into URL paths. Defense against
+# path traversal / unintended endpoint hits at the eBird API.
+_REGION_RE = re.compile(r"^([A-Z]{2}(-[A-Z0-9]+)*|L\d+)$")
+_SPECIES_RE = re.compile(r"^[a-z0-9]+$")
+_LOCALE_RE = re.compile(r"^[a-z]{2}(_[A-Z]{2})?$")
+_TAXONOMY_CAT = frozenset({"species", "issf", "hybrid", "slash", "spuh", "domestic", "form"})
+_TAXONOMY_FMT = frozenset({"json", "csv"})
 
 from core.interfaces import MCPPlugin, PluginType, ToolDefinition, ToolResult
 from plugins.ebird.config_schema import EBirdPluginConfig
@@ -322,6 +331,15 @@ class EBirdPlugin(MCPPlugin):
                 content=[], success=False, error_message="eBird plugin not initialized"
             )
 
+        # Validate and clamp arguments before any upstream call. Rejects
+        # malformed regionCode/speciesCode etc. (defense against path
+        # injection) and silently clamps numeric ranges so a 'maxResults:
+        # 1000000' doesn't waste an eBird round-trip.
+        try:
+            arguments = _clamp_and_validate(arguments)
+        except ValueError as e:
+            return ToolResult(content=[], success=False, error_message=str(e))
+
         # Map detail='full' -> 'simple' if upstream rejects it (mirrors JS reference).
         detail = arguments.get("detail", "simple")
         if detail not in ("simple", "full"):
@@ -461,6 +479,90 @@ def _require(args: Dict[str, Any], key: str) -> Any:
     if key not in args or args[key] in (None, ""):
         raise KeyError(key)
     return args[key]
+
+
+def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Clamp numeric args and validate string args against expected formats.
+
+    Numeric args (back, maxResults, dist) get silently clamped into the
+    range eBird accepts — better than a 400 round-trip. String args that
+    flow into URL paths or that take a known set of values are rejected
+    outright with a clear error.
+
+    Returns a new dict with cleaned values.
+    Raises ValueError if a string argument fails validation.
+    """
+    out = dict(args)
+
+    if "regionCode" in out and out["regionCode"] is not None:
+        v = out["regionCode"]
+        if not isinstance(v, str) or not _REGION_RE.match(v):
+            raise ValueError(
+                f"Invalid regionCode: {v!r}. Expected e.g. 'US', 'US-NY', "
+                f"'US-NY-109', or a hotspot location ID like 'L12345'."
+            )
+
+    if "speciesCode" in out and out["speciesCode"] is not None:
+        v = out["speciesCode"]
+        if not isinstance(v, str) or not _SPECIES_RE.match(v):
+            raise ValueError(
+                f"Invalid speciesCode: {v!r}. Expected lowercase alphanumeric, "
+                f"e.g. 'amecro' for American Crow."
+            )
+
+    if "cat" in out and out["cat"] is not None:
+        v = out["cat"]
+        if v not in _TAXONOMY_CAT:
+            raise ValueError(
+                f"Invalid cat: {v!r}. Allowed: {sorted(_TAXONOMY_CAT)}."
+            )
+
+    if "fmt" in out and out["fmt"] is not None:
+        v = out["fmt"]
+        if v not in _TAXONOMY_FMT:
+            raise ValueError(f"Invalid fmt: {v!r}. Allowed: {sorted(_TAXONOMY_FMT)}.")
+
+    if "locale" in out and out["locale"] is not None:
+        v = out["locale"]
+        if not isinstance(v, str) or not _LOCALE_RE.match(v):
+            raise ValueError(
+                f"Invalid locale: {v!r}. Expected ISO codes like 'en', 'es', 'pt_BR'."
+            )
+
+    if out.get("back") is not None:
+        out["back"] = _clamp_int(out["back"], 1, 30, "back")
+    if out.get("maxResults") is not None:
+        out["maxResults"] = _clamp_int(out["maxResults"], 1, 10000, "maxResults")
+    if out.get("dist") is not None:
+        out["dist"] = _clamp_int(out["dist"], 0, 50, "dist")
+
+    if out.get("lat") is not None:
+        lat = _coerce_float(out["lat"], "lat")
+        if not (-90 <= lat <= 90):
+            raise ValueError(f"Invalid lat: {lat}. Must be between -90 and 90.")
+        out["lat"] = lat
+    if out.get("lng") is not None:
+        lng = _coerce_float(out["lng"], "lng")
+        if not (-180 <= lng <= 180):
+            raise ValueError(f"Invalid lng: {lng}. Must be between -180 and 180.")
+        out["lng"] = lng
+
+    return out
+
+
+def _clamp_int(value: Any, lo: int, hi: int, name: str) -> int:
+    try:
+        i = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {name}: {value!r}. Expected integer.")
+    return max(lo, min(hi, i))
+
+
+def _coerce_float(value: Any, name: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {name}: {value!r}. Expected number.")
 
 
 def _ok(text: str) -> ToolResult:

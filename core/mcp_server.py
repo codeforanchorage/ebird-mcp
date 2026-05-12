@@ -3,6 +3,7 @@
 import json
 import logging
 import time
+import uuid
 from typing import Any, Dict, Optional
 
 from core.logging_utils import (
@@ -108,26 +109,34 @@ class MCPServer:
 
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
+            # Don't echo exception text to the client — it can leak file
+            # paths, library internals, or traceback fragments. Mint a
+            # correlation ID and log the full exception to CloudWatch.
+            error_id = uuid.uuid4().hex
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
                     "code": -32603,
                     "message": "Internal error",
-                    "data": str(e),
+                    "data": f"Error ID: {error_id}",
                 },
             }
             response_log_data = format_jsonrpc_response_log(
                 request_id=request_id,
                 method=method,
-                error=error_response.get("error"),
+                error={"code": -32603, "message": "Internal error", "data": str(e)},
                 duration_ms=duration_ms,
             )
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
             logger.error(
-                f"Error handling JSON-RPC request {method}: {e}",
-                extra={**response_log_data, "error_type": type(e).__name__},
+                f"Error handling JSON-RPC request {method} [error_id={error_id}]: {e}",
+                extra={
+                    **response_log_data,
+                    "error_type": type(e).__name__,
+                    "error_id": error_id,
+                },
                 exc_info=True,
             )
             if is_notification:

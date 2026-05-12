@@ -21,6 +21,11 @@ class LambdaContext(Protocol):
 
 logger = logging.getLogger(__name__)
 
+# 64 KB is well above any legitimate MCP request body — `tools/call`
+# with all-string args at our largest tool is ~1 KB. Anything bigger is
+# either accidental or hostile; either way we reject before parsing.
+MAX_BODY_BYTES = 64 * 1024
+
 _handler: Optional[UniversalHTTPHandler] = None
 
 
@@ -96,6 +101,40 @@ def lambda_handler(
 
         if isinstance(body, dict):
             body = json.dumps(body)
+
+        # Reject oversized payloads before JSON parsing so a 10 MB blob
+        # cannot exhaust Lambda memory or stall the request loop.
+        if isinstance(body, str) and len(body) > MAX_BODY_BYTES:
+            error_origin = (event.get("headers") or {}).get(
+                "origin"
+            ) or (event.get("headers") or {}).get("Origin")
+            error_cors = UniversalHTTPHandler._get_cors_headers(error_origin)
+            logger.warning(
+                "Rejected oversized request body",
+                extra={
+                    "request_id": request_id,
+                    "body_bytes": len(body),
+                    "max_body_bytes": MAX_BODY_BYTES,
+                },
+            )
+            return {
+                "statusCode": 413,
+                "headers": {
+                    "Content-Type": "application/json; charset=utf-8",
+                    **error_cors,
+                },
+                "body": json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32600,
+                            "message": "Request body too large",
+                            "data": f"Limit: {MAX_BODY_BYTES} bytes",
+                        },
+                    }
+                ),
+            }
 
         headers = event.get("headers", {})
         if isinstance(headers, dict):
