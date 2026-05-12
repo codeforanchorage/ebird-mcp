@@ -1,0 +1,35 @@
+# eBird MCP Configuration Template
+# =================================
+#
+# Copy this file to config.yaml and fill in your eBird API key:
+#   cp config-example.yaml config.yaml
+#
+# Get an eBird API key at https://ebird.org/api/keygen (free, instant).
+#
+# One Fork = One MCP Server: enable exactly ONE plugin per deployment.
+
+---
+server_name: "eBird MCP"
+description: "eBird API access for MCP clients (Claude, etc.) - recent observations, notable birds, hotspots, taxonomy"
+organization: "Code for Anchorage"
+
+plugins:
+  # Built-in: eBird (https://api.ebird.org/v2)
+  ebird:
+    enabled: true                 # Must be true; the only plugin in this fork.
+    api_key: "REPLACE_ME"         # eBird API key from https://ebird.org/api/keygen
+    base_url: "https://api.ebird.org/v2"
+    timeout: 30                   # HTTP timeout in seconds (1-120)
+    default_max_results: 100      # Default if caller omits maxResults
+    default_back: 14              # Default "back" (days) if caller omits — eBird hard-caps at 30
+
+# AWS deployment settings (used by Terraform via locals in terraform/aws/main.tf)
+aws:
+  region: "us-west-2"             # AWS region for Lambda + API Gateway
+  lambda_name: "ebird-mcp"        # Lambda function name (Terraform may override via tfvars)
+  lambda_memory: 512              # Lambda memory in MB (128-10240)
+  lambda_timeout: 30              # Lambda timeout in seconds (max 900)
+
+logging:
+  level: "INFO"                   # DEBUG, INFO, WARNING, ERROR
+  format: "json"                  # json or text

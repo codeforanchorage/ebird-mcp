@@ -1,0 +1,95 @@
+"""Core interfaces and data models for eBird MCP plugins.
+
+This module defines the abstract base classes and data models that all plugins
+must implement. The core framework is universal and is not modified by plugins.
+"""
+
+from abc import ABC, abstractmethod
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class PluginType(str, Enum):
+    """Types of plugins supported by the framework."""
+
+    OPEN_DATA = "open_data"
+    CUSTOM_API = "custom_api"
+    DATABASE = "database"
+    ANALYTICS = "analytics"
+
+
+class ToolDefinition(BaseModel):
+    """Definition of an MCP tool provided by a plugin."""
+
+    name: str = Field(..., description="Tool name (without plugin prefix)")
+    description: str = Field(..., description="Human-readable tool description")
+    input_schema: Dict[str, Any] = Field(
+        ..., description="JSON Schema for tool input parameters"
+    )
+
+
+class ToolResult(BaseModel):
+    """Result of executing a tool."""
+
+    content: List[Dict[str, Any]] = Field(
+        default_factory=list, description="Tool output content"
+    )
+    success: bool = Field(..., description="Whether the tool execution succeeded")
+    error_message: Optional[str] = Field(
+        None, description="Error message if execution failed"
+    )
+
+
+class MCPPlugin(ABC):
+    """Abstract base class for all plugins.
+
+    All plugins must inherit from this class and implement all required methods.
+    Plugins are discovered automatically and loaded by the Plugin Manager.
+    """
+
+    plugin_name: str = ""
+    plugin_type: PluginType = PluginType.CUSTOM_API
+    plugin_version: str = "1.0.0"
+
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """Initialize plugin with configuration."""
+        self.config = config
+        self._initialized = False
+
+    @abstractmethod
+    async def initialize(self) -> bool:
+        """Initialize the plugin and verify it can connect to its data source."""
+        pass
+
+    @abstractmethod
+    async def shutdown(self) -> None:
+        """Clean up plugin resources."""
+        pass
+
+    @abstractmethod
+    def get_tools(self) -> List[ToolDefinition]:
+        """Get list of tools provided by this plugin.
+
+        Tool names should NOT include the plugin prefix. The Plugin Manager
+        will add the prefix automatically using double underscores
+        (e.g., ``ebird__get_recent_observations``).
+        """
+        pass
+
+    @abstractmethod
+    async def execute_tool(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> ToolResult:
+        """Execute a tool by name."""
+        pass
+
+    @abstractmethod
+    async def health_check(self) -> bool:
+        """Check if the plugin is healthy and can reach its data source."""
+        pass
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._initialized

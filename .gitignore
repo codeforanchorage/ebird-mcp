@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[codz]
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+.venv/
+venv/
+.python-version
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local-only files containing secrets / personal config
+# (commit *.example versions instead; the real ones stay local)
+config.yaml
+.mcp.json
+.env
+.env.*
+
+# Lambda deployment artifacts (rebuilt by scripts/deploy.sh)
+.deploy/
+*.zip
+terraform/aws/lambda-deployment.zip
+terraform/aws/config.yaml
+
+# Terraform — local state and account-specific backend wiring.
+# .terraform.lock.hcl IS intentionally NOT ignored; commit it so
+# provider versions are reproducible across machines.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+terraform/aws/backend.tf
+
+# Node (the stdio reference server bundles a node_modules tree)
+mcp-server/node_modules/
+
+# Local working / scratch
+.scratch/
+
+# Claude Code per-user / per-machine settings
+.claude/settings.local.json
