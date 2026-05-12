@@ -1,15 +1,44 @@
 # eBird MCP Server (AWS Lambda)
 
-An [MCP](https://modelcontextprotocol.io) server that exposes the [eBird v2 REST API](https://documenter.getpostman.com/view/664302/S1ENwy59) as tools usable by Claude (and other MCP clients). Deploys to AWS Lambda + API Gateway + WAF via Terraform.
+**Talk to Claude about birds.** A hosted [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude (and other MCP clients) query the [eBird v2 API](https://documenter.getpostman.com/view/664302/S1ENwy59) conversationally — recent sightings, notable rarities, hotspots, and the full eBird taxonomy, exposed as 10 callable tools.
 
-This is a port of the [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) stdio server, restructured into the [Code for Anchorage OpenContext](https://github.com/codeforanchorage/anchorage-gis-mcp) architecture so it can run as a hosted HTTP MCP endpoint.
+Ask Claude *"What rare birds have been seen in Alaska this week?"* and it picks the right tool, calls eBird, and answers in plain English with species, locations, and dates. No screen-scraping, no separate UI — just Claude with new abilities.
+
+Runs on AWS Lambda + API Gateway + WAF. Deployable to your own AWS account in about 10 minutes with one `terraform apply`. Hard cost ceiling at ~$25/month even under viral load, ~$8/month at typical use.
+
+Built by [Code for Anchorage](https://codeforanchorage.org), modeled on the [OpenContext](https://github.com/CityOfBoston/OpenContext) / [anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) plugin architecture. Ports the tool surface of the upstream npm [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) stdio reference into a hosted HTTP endpoint so anyone can connect Claude via a URL — no local install required.
+
+## Try it (no deploy needed)
+
+Code for Anchorage hosts a public instance at:
+
+> **`https://ebird.codeforanchorage.org/mcp`**
+
+In Claude (web or desktop) → **Settings → Connectors → Add custom connector**, paste that URL, and you're done. Then ask:
+
+- *"What's been seen at birding hotspots near Anchorage in the last 3 days?"*
+- *"Have any Snowy Owls been reported in Alaska this winter?"*
+- *"Show me notable sightings within 25 km of Homer, Alaska."*
+- *"What's the scientific name for the eBird code 'amecro'? Any hybrids tracked for Mallards?"*
+- *"Find the top 10 hotspots in Southeast Alaska by species count."*
+
+Claude picks the right tool from the 10 below, calls eBird, and answers with real data.
+
+## When you'd want to deploy your own copy
+
+- You want a different eBird API key (rate-limit isolation, separate usage tracking)
+- You want to lock the connector to your own domain
+- You want to extend it with other data sources via the plugin architecture (one fork = one MCP server)
+- You're learning AWS / MCP / Terraform and this is a small, complete reference
 
 ## What you get
 
-- **Single public `POST /mcp` endpoint** — Streamable HTTP JSON-RPC. Paste the URL into Claude (or any MCP client) and you get the eBird tools.
-- **10 tools** ported from the stdio reference server: recent observations, notable observations, nearby observations (with species variants), hotspots, nearby hotspots, taxonomy, taxonomy forms.
-- **AWS Lambda + API Gateway REST + WAFv2** — rate-limited per-IP, daily quota, CloudWatch logs and alarms, X-Ray tracing.
-- **One Terraform apply** — `./scripts/deploy.sh --environment prod` does the rest.
+- **Single public `POST /mcp` endpoint** — Streamable HTTP JSON-RPC. Paste the URL into Claude and the eBird tools light up automatically.
+- **10 tools** covering recent observations, notable rarities, nearby observations (with species filters), hotspots, nearby hotspots, taxonomy, and species forms — full table below.
+- **AWS Lambda + API Gateway REST + WAFv2** — per-IP rate limiting, daily quota, CloudWatch alarms (Lambda errors, throttles, p95 duration, API Gateway 4xx/5xx probing), X-Ray tracing, JSON access logs.
+- **One Terraform apply** — `./scripts/deploy.sh --environment prod` builds the deployment zip, plans, prompts, and applies.
+- **Stateless and horizontally scalable** — `Mcp-Session-Id` is for log correlation only; no per-session storage.
+- **Hard cost ceiling** — default `api_quota_limit` in `prod.tfvars` is 50k requests/day, capping worst-case AWS spend around $25/month even under a denial-of-wallet attack.
 
 ## Architecture
 
@@ -149,6 +178,21 @@ logging:
 - **Rate limits.** Defaults in `prod.tfvars`: WAF 300 req/IP/5min, API GW 5 rps / 10 burst / 3000/day. Tune for your traffic.
 - **Cold-start cleanup.** The Lambda adapter shuts down the plugin manager after every invocation to avoid `"Event loop is closed"` errors with httpx. This means each invocation re-initializes the eBird client (one `taxonomy/forms` smoke call). At Lambda concurrency this is fine; if cold-starts become a problem, keep the client at module scope and remove the shutdown in `_run_with_cleanup`.
 - **MCP protocol version advertised.** `"2025-03-26"` — bump in `core/mcp_server.py::_handle_initialize` if Claude Connectors moves on.
+
+## Cost
+
+At AWS pricing as of mid-2026, with the default `prod.tfvars` settings (`api_quota_limit = 50000`, `lambda_reserved_concurrency = 50`):
+
+| Traffic | Approx. monthly cost |
+|---|---|
+| Quiet (~100 req/day) | ~$6 (mostly the $5 WAF ACL) |
+| Typical use (~1k req/day) | ~$8 |
+| Trending (~10k req/day) | ~$12 |
+| Cap hit every day (50k/day) | ~$25 worst case |
+
+The daily quota acts as a hard cost ceiling — a denial-of-wallet attack or a runaway viral spike can't push the bill past ~$25 because excess requests get 429d at the API Gateway. Lambda is essentially free at conversational traffic levels (the AWS perpetual free tier covers 1M requests + 400k GB-seconds/month).
+
+If you expect more than 50k req/day of real traffic, raise `api_quota_limit` deliberately in `prod.tfvars` — and consider asking eBird about acceptable use before publicizing the connector.
 
 ## Adding more tools / plugins
 
