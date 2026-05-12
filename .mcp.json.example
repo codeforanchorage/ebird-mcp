@@ -2,9 +2,10 @@
   "mcpServers": {
     "ebird-api": {
       "type": "stdio",
-      "command": "node",
+      "command": "npx",
       "args": [
-        "./mcp-server/node_modules/ebird-mcp-server/index.js",
+        "-y",
+        "ebird-mcp-server@1.0.1",
         "--api-key",
         "REPLACE_WITH_YOUR_EBIRD_API_KEY"
       ],

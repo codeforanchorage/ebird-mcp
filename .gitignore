@@ -48,9 +48,6 @@ crash.log
 crash.*.log
 terraform/aws/backend.tf
 
-# Node (the stdio reference server bundles a node_modules tree)
-mcp-server/node_modules/
-
 # Local working / scratch
 .scratch/
 

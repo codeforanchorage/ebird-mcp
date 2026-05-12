@@ -86,7 +86,8 @@ local_server.py       aiohttp wrapper for local testing on http://localhost:8000
 stdio_bridge.py       stdio<->HTTP bridge for stdio-only MCP clients
 config.yaml           local config (gitignored; copy from config-example.yaml)
 config-example.yaml   template
-mcp-server/           original stdio reference (kept for reference)
+.mcp.json             stdio MCP config (gitignored; copy from .mcp.json.example)
+.mcp.json.example     stdio MCP template — runs upstream `ebird-mcp-server` via `npx`
 ```
 
 ## Prerequisites
