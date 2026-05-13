@@ -23,6 +23,11 @@ output "api_gateway_url" {
   value       = "${aws_api_gateway_stage.prod.invoke_url}/mcp"
 }
 
+output "usage_dashboard_url" {
+  description = "CloudWatch dashboard with session/client/tool usage widgets."
+  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.usage.dashboard_name}"
+}
+
 # ── Custom-domain outputs (only populated when var.custom_domain is set) ──
 #
 # After the FIRST `terraform apply`, ACM creates a validation CNAME that you
