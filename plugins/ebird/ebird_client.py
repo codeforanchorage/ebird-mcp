@@ -1,14 +1,23 @@
 """Async HTTP client for the eBird API.
 
 Wraps the endpoints used by the JS stdio reference server (10 tools).
+
+Each public method returns ``(data, url, params)`` — the data, the fully
+qualified URL that was hit, and the params dict that was sent. The plugin
+echoes those back in tool responses so the LLM cannot omit attribution
+or misreport what was asked.
 """
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# A response envelope from the eBird API. Carrying the URL and params alongside
+# the data lets the plugin attach provenance without reconstructing the request.
+ApiResponse = Tuple[Any, str, Dict[str, Any]]
 
 
 class EBirdClient:
@@ -36,10 +45,11 @@ class EBirdClient:
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
         accept_json: bool = True,
-    ) -> Any:
+    ) -> ApiResponse:
         """Run a GET against the eBird API.
 
-        Returns parsed JSON when `accept_json` is True, otherwise the raw body text.
+        Returns ``(body, full_url, clean_params)``. ``body`` is parsed JSON
+        when ``accept_json`` is True, otherwise the raw response text.
         """
         clean_params: Dict[str, Any] = {}
         if params:
@@ -56,7 +66,8 @@ class EBirdClient:
             endpoint, params=clean_params, headers={"Accept": accept}
         )
         response.raise_for_status()
-        return response.json() if accept_json else response.text
+        body = response.json() if accept_json else response.text
+        return body, f"{self.base_url}{endpoint}", clean_params
 
     # ---- Observations -----------------------------------------------------
 
@@ -68,7 +79,7 @@ class EBirdClient:
         include_provisional: Optional[bool] = None,
         hotspot: Optional[bool] = None,
         detail: str = "simple",
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         # The /detailed endpoint returns 400 in several regions; the reference
         # JS server falls back to simple. Mirror that behavior.
         endpoint = (
@@ -94,7 +105,7 @@ class EBirdClient:
         max_results: Optional[int] = None,
         include_provisional: Optional[bool] = None,
         hotspot: Optional[bool] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         endpoint = f"/data/obs/{region_code}/recent/{species_code}"
         return await self._get(
             endpoint,
@@ -112,7 +123,7 @@ class EBirdClient:
         back: Optional[int] = None,
         max_results: Optional[int] = None,
         detail: str = "simple",
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         endpoint = (
             f"/data/obs/{region_code}/recent/notable/detailed"
             if detail == "full"
@@ -131,7 +142,7 @@ class EBirdClient:
         max_results: Optional[int] = None,
         include_provisional: Optional[bool] = None,
         hotspot: Optional[bool] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         return await self._get(
             "/data/obs/geo/recent",
             params={
@@ -152,7 +163,7 @@ class EBirdClient:
         dist: Optional[int] = None,
         back: Optional[int] = None,
         max_results: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         return await self._get(
             "/data/obs/geo/recent/notable",
             params={
@@ -173,7 +184,7 @@ class EBirdClient:
         back: Optional[int] = None,
         max_results: Optional[int] = None,
         include_provisional: Optional[bool] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         return await self._get(
             f"/data/obs/geo/recent/{species_code}",
             params={
@@ -192,7 +203,7 @@ class EBirdClient:
         self,
         region_code: str,
         back: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         # The /ref/hotspot/{region} endpoint returns CSV by default; force JSON.
         return await self._get(
             f"/ref/hotspot/{region_code}",
@@ -205,7 +216,7 @@ class EBirdClient:
         lng: float,
         dist: Optional[int] = None,
         back: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         params = {
             "lat": lat,
             "lng": lng,
@@ -222,10 +233,10 @@ class EBirdClient:
                 f"Falling back to text response for nearby hotspots: {e}"
             )
             params_text = {k: v for k, v in params.items() if k != "fmt"}
-            text = await self._get(
+            text, url, sent = await self._get(
                 "/ref/hotspot/geo", params=params_text, accept_json=False
             )
-            return _parse_hotspot_text(text, lat, lng)
+            return _parse_hotspot_text(text, lat, lng), url, sent
 
     # ---- Taxonomy ---------------------------------------------------------
 
@@ -234,13 +245,13 @@ class EBirdClient:
         locale: str = "en",
         cat: str = "species",
         fmt: str = "json",
-    ) -> List[Dict[str, Any]]:
+    ) -> ApiResponse:
         return await self._get(
             "/ref/taxonomy/ebird",
             params={"locale": locale, "cat": cat, "fmt": fmt},
         )
 
-    async def get_taxonomy_forms(self, species_code: str) -> List[Dict[str, Any]]:
+    async def get_taxonomy_forms(self, species_code: str) -> ApiResponse:
         return await self._get(f"/ref/taxonomy/forms/{species_code}")
 
 
