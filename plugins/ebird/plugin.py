@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 # Strict regexes for arguments that flow into URL paths. Defense against
 # path traversal / unintended endpoint hits at the eBird API.
 _REGION_RE = re.compile(r"^([A-Z]{2}(-[A-Z0-9]+)*|L\d+)$")
+_LOCID_RE = re.compile(r"^L\d+$")
 _SPECIES_RE = re.compile(r"^[a-z0-9]+$")
 _LOCALE_RE = re.compile(r"^[a-z]{2}(_[A-Z]{2})?$")
 _TAXONOMY_CAT = frozenset({"species", "issf", "hybrid", "slash", "spuh", "domestic", "form"})
@@ -69,6 +70,16 @@ _NEARBY_OBSERVATION_TOOLS = frozenset({
 _NOTABLE_TOOLS = frozenset({
     "get_notable_observations",
     "get_nearby_notable_observations",
+})
+
+# Region-scoped endpoints that collapse to the single most-recent observation
+# of each species. Their per-record locId is "where that species was last seen
+# in the whole region," not a per-location feed — filtering their results by
+# location silently undercounts. (The /geo/ nearby variants share this shape
+# but are already spatially scoped, so the misuse doesn't arise.)
+_REGION_DEDUPED_TOOLS = frozenset({
+    "get_recent_observations",
+    "get_notable_observations",
 })
 
 _SPECIES_SPECIFIC_TOOLS = frozenset({
@@ -217,8 +228,11 @@ class EBirdPlugin(MCPPlugin):
                 name="get_recent_observations",
                 description=(
                     "Get recent bird observations in an eBird region (country, state/province, "
-                    "county, or hotspot). Returns species, location, count, observer, checklist "
-                    "URL, and review status for each entry.\n\n" + workflow
+                    "county, or hotspot). Returns the single most recent observation of EACH "
+                    "species in the region — one record per species, not a full feed. To find "
+                    "what was seen at a specific place, pass that place's hotspot L-code as "
+                    "regionCode; do NOT pull a whole county and filter the results by location "
+                    "(that undercounts — see the response caveats).\n\n" + workflow
                 ),
                 input_schema={
                     "type": "object",
@@ -763,6 +777,19 @@ _NOTABLE_IS_LOCAL_CAVEAT = (
     "not generalize to regional or national rarity from a notable list."
 )
 
+_REGION_DEDUPED_CAVEAT = (
+    "⚠️ ONE-RECORD-PER-SPECIES: this region pull returns only the single most "
+    "recent observation of each species. The location on each record is just "
+    "wherever that species was last seen *anywhere in the region* — it is NOT "
+    "a complete per-location feed. Do NOT filter this list by location to "
+    "answer \"what was seen at <place>\": that silently drops every species "
+    "that was present there but last reported elsewhere in the region. "
+    "Instead, resolve the place to an eBird hotspot L-code (get_hotspots / "
+    "get_nearby_hotspots) and re-call this tool with that L-code as "
+    "regionCode, or use get_nearby_observations with the place's lat/lng. "
+    "Keep the region-wide call only for the region-wide picture."
+)
+
 
 def _build_caveats(
     tool_name: str,
@@ -781,6 +808,15 @@ def _build_caveats(
         # birds in the area" when it really means "no birds notable HERE."
         if tool_name in _NOTABLE_TOOLS:
             caveats.append(_NOTABLE_IS_LOCAL_CAVEAT)
+
+        # ONE-RECORD-PER-SPECIES fires on the tool + regionCode shape, not the
+        # data: it warns about how the result may be *used*, so it must fire
+        # even on empty/small results. Suppressed when regionCode is already an
+        # L-code (the list is then location-scoped — nothing to misfilter).
+        if tool_name in _REGION_DEDUPED_TOOLS:
+            region = arguments.get("regionCode")
+            if isinstance(region, str) and not _LOCID_RE.match(region):
+                caveats.append(_REGION_DEDUPED_CAVEAT)
 
         if tool_name == "get_taxonomy_forms" and isinstance(data, list) and len(data) > 1:
             requested = arguments.get("speciesCode", "?")
