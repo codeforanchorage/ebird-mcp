@@ -252,7 +252,9 @@ class EBirdClient:
         )
 
     async def get_taxonomy_forms(self, species_code: str) -> ApiResponse:
-        return await self._get(f"/ref/taxonomy/forms/{species_code}")
+        # eBird's endpoint is /ref/taxon/forms — NOT /ref/taxonomy/forms
+        # (the latter 404s for every species code).
+        return await self._get(f"/ref/taxon/forms/{species_code}")
 
 
 def _parse_hotspot_text(text: str, lat: float, lng: float) -> List[Dict[str, Any]]:
