@@ -98,6 +98,12 @@ resource "aws_cloudwatch_log_group" "lambda_logs" {
   name              = "/aws/lambda/${local.lambda_name}"
   retention_in_days = 14
 
+  # Discovered by the mcp-observability project via the Resource Groups
+  # Tagging API. Keep this tag on every MCP fork's log groups.
+  tags = {
+    Project = "mcp-server"
+  }
+
   lifecycle {
     create_before_destroy = true
   }
