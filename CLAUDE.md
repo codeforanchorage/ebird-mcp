@@ -66,7 +66,7 @@ Key design points future Claude should know before editing:
 - `server/http_handler.py` — `ALLOWED_ORIGINS` CORS allowlist; config env-var loader.
 - `server/adapters/aws_lambda.py` — Lambda entry point; body size cap; per-invocation cleanup.
 - `plugins/ebird/plugin.py` — tool catalog (`get_tools`) + dispatch (`execute_tool`); hardening helpers.
-- `plugins/ebird/ebird_client.py` — thin httpx wrapper over eBird v2.
+- `plugins/ebird/ebird_client.py` — thin httpx wrapper over eBird v2. Watch the endpoint paths: eBird is inconsistent — taxonomy lives under `/ref/taxonomy/ebird` but taxonomic *forms* live under `/ref/taxon/forms/{speciesCode}` (`taxon`, not `taxonomy`). The wrong path 404s for every species; don't "correct" `taxon` back to `taxonomy`.
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
