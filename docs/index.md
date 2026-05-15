@@ -152,16 +152,32 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
 
 === "Microsoft Copilot"
 
-    **Copilot Studio (builder)**
+    **Microsoft Copilot and remote MCP servers**
 
-    Microsoft 365 Copilot (end-user) doesn't yet ship user-facing MCP server configuration. Builder/developer surfaces do:
+    MCP is generally available in both Copilot Studio and Microsoft 365 Declarative Agents. The consumer "Microsoft Copilot" surface (the Bing/Edge chat) does **not** support arbitrary MCP connections — for that, you want one of the agent-builder paths below. Both require a Microsoft 365 license with Copilot access.
 
-    1. Open [Copilot Studio](https://copilotstudio.microsoft.com).
-    2. In your agent/topic, go to **Tools → Add a tool → Model Context Protocol**.
-    3. Configure the connection with the URL `https://ebird.codeforanchorage.org/mcp` and no authentication.
-    4. Publish the agent to make the eBird tools available.
+    **A. Copilot Studio (low-code)**
 
-    Reference: [Microsoft Learn — Connect to MCP servers](https://learn.microsoft.com).
+    1. Sign in to [Copilot Studio](https://copilotstudio.microsoft.com) and open (or create) your agent.
+    2. Turn on **generative orchestration** in the agent settings — required for MCP.
+    3. Use the **MCP onboarding wizard** under **Tools → Add a tool → Model Context Protocol** to connect to an existing server:
+        - **Server URL**: `https://ebird.codeforanchorage.org/mcp`
+        - **Authentication**: None
+    4. The wizard auto-discovers the eBird tools and adds them to the agent. Publish to make them available.
+
+    **B. Microsoft 365 Declarative Agents (developer)**
+
+    For a code-based path that lives in a repo:
+
+    1. Install the **Microsoft 365 Agents Toolkit** extension in VS Code.
+    2. Scaffold a new declarative agent.
+    3. Add an **MCP action**, enter `https://ebird.codeforanchorage.org/mcp`, select the eBird tools you want to expose, and set authentication to none.
+    4. Deploy the agent to your M365 tenant.
+
+    !!! note "Transport"
+        Copilot Studio supports both Streamable HTTP and SSE transports. SSE has been deprecated in the MCP spec but remains in public preview in Copilot Studio, so either works against this server today.
+
+    Reference: [Microsoft Learn — MCP in Copilot Studio](https://learn.microsoft.com) and the [Microsoft 365 Agents Toolkit docs](https://learn.microsoft.com).
 
 If your client isn't listed: any MCP client that supports **Streamable HTTP** transport will work. Point it at the URL above.
 
