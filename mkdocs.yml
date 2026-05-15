@@ -1,6 +1,6 @@
 site_name: eBird MCP Server
 site_description: A hosted Model Context Protocol server for the eBird v2 API — connect Claude, ChatGPT, Gemini, or Copilot to real bird-observation data.
-site_url: https://codeforanchorage.github.io/ebird-mcp/
+site_url: https://codeforanchorage.org/ebird-mcp/
 repo_url: https://github.com/codeforanchorage/ebird-mcp
 repo_name: codeforanchorage/ebird-mcp
 
