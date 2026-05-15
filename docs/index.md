@@ -206,6 +206,24 @@ The server also adds civic-AI safety caveats: it flags single-observer claims, a
 
 ---
 
+## Going deeper
+
+Most of these tools are atomic — one call, one slice of data. For richer answers, your AI can chain them. Two recipes worth knowing about:
+
+**Active-hotspot snapshot (breadth across a region)**
+
+`get_hotspots(regionCode)` to enumerate locations → sort by `latestObsDt` to skip stale ones → for each active hotspot, `get_recent_observations(locId)` → aggregate. The single region-wide call deduplicates to one record per species; fanning out per-hotspot gives you the per-location feeds it omits.
+
+Try: *"Give me a deep snapshot of what's birding around Anchorage this week — fan out across the active hotspots."*
+
+**Target-species hunt (depth on one species)**
+
+`get_taxonomy(cat="species")` to confirm the speciesCode → `get_taxonomy_forms(speciesCode)` to find subspecies and form codes → `get_recent_observations_for_species` against each form separately. Observers may report under any form code, so a single-code query can miss real sightings.
+
+Try: *"Find every recent Yellow-rumped Warbler sighting in Alaska, including all subspecies."*
+
+---
+
 ## Self-host
 
 For production, regular use, or anything mission-critical, run your own copy:
