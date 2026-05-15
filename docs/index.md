@@ -49,7 +49,7 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
 
     **A. Claude.ai (web or app) — Connectors UI**
 
-    Requires a **Pro, Team, or Enterprise** plan. Free-tier accounts can't add connectors through the UI — use path B below instead.
+    Available on **Free, Pro, Max, Team, and Enterprise** plans. Free-tier accounts can add **one** custom connector; paid tiers can add more. eBird MCP is one connector, so this works on free.
 
     1. Open **Settings → Connectors**.
     2. Click **Add Custom Connector**.
@@ -59,7 +59,7 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
     4. Click **Add**, then **Connect** (follow any auth prompts — this server uses no auth, so it should connect immediately).
     5. The connector appears in your chat tools automatically in any new conversation.
 
-    **B. Claude Desktop — JSON config (works on free tier)**
+    **B. Claude Desktop — JSON config (alternative)**
 
     1. Open Claude Desktop → **Developer** (left sidebar) → **Edit Config**. This opens `claude_desktop_config.json`:
         - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
