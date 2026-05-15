@@ -45,17 +45,43 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
 
 === "Claude"
 
-    **Claude.ai (web) or Claude Desktop**
+    Two paths depending on which Claude surface you're using.
 
-    1. Open **Settings → Connectors** (web) or **Settings → Developer → MCP servers** (Desktop).
-    2. Click **Add custom connector**.
+    **A. Claude.ai (web or app) — Connectors UI**
+
+    Requires a **Pro, Team, or Enterprise** plan. Free-tier accounts can't add connectors through the UI — use path B below instead.
+
+    1. Open **Settings → Connectors**.
+    2. Click **Add Custom Connector**.
     3. Fill in:
         - **Name**: `eBird MCP`
         - **URL**: `https://ebird.codeforanchorage.org/mcp`
-    4. Save. The connector becomes available in any new conversation — you'll see eBird tools appear in the tool list.
+    4. Click **Add**, then **Connect** (follow any auth prompts — this server uses no auth, so it should connect immediately).
+    5. The connector appears in your chat tools automatically in any new conversation.
+
+    **B. Claude Desktop — JSON config (works on free tier)**
+
+    1. Open Claude Desktop → **Developer** (left sidebar) → **Edit Config**. This opens `claude_desktop_config.json`:
+        - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+        - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+    2. Add an `mcpServers` entry:
+
+        ```json
+        {
+          "mcpServers": {
+            "ebird": {
+              "url": "https://ebird.codeforanchorage.org/mcp"
+            }
+          }
+        }
+        ```
+
+    3. Save and **fully quit and reopen** Claude Desktop (not just close the window — it needs to restart to pick up the new config).
 
     !!! tip
-        After adding, try: *"What rare birds have been reported near Anchorage, Alaska in the past week?"* Claude will route the request through `ebird__get_nearby_notable_observations` and return real observations with checklist links and review-status flags.
+        Connected either way, try: *"What rare birds have been reported near Anchorage, Alaska in the past week?"* Claude will route through `ebird__get_nearby_notable_observations` and return real observations with checklist links and review-status flags.
+
+    Reference: [support.claude.com](https://support.claude.com) for the latest Connectors / Claude Desktop docs.
 
 === "ChatGPT"
 
