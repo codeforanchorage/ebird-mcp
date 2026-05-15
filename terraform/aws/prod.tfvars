@@ -28,11 +28,19 @@ api_rate_limit  = 20
 api_burst_limit = 40
 
 # WAF per-IP rate (rolling 5-minute window).
-# 1000 / 5min = ~3.3 rps per IP. Real users sending one MCP request per
-# conversational turn are nowhere near this; scrapers and denial-of-wallet
-# probes from a single IP hit the block. Distributed attacks are still
-# capped at the daily API Gateway quota above.
-waf_rate_limit_per_5min = 1000
+#
+# 50 / 5min = 10 req/min per IP. Sized against the *upstream* eBird quota
+# (1000 calls/day), NOT against AWS-side capacity. At 10 req/min one IP
+# could in theory drain the entire daily eBird budget in ~100 minutes —
+# already much friendlier than the previous 1000/5min cap, which let a
+# single IP drain the budget in five minutes. Real conversational use
+# (one MCP call per LLM turn) is well under one req/min, so this is not
+# a user-visible limit for legitimate clients.
+#
+# If a single IP needs more headroom (e.g. a partner running batch jobs),
+# raise this deliberately and coordinate with them, or have them
+# self-host via scripts/deploy.sh.
+waf_rate_limit_per_5min = 50
 
 # Custom domain for the API Gateway. Setting this triggers:
 #   - ACM cert issuance (DNS-validated, in us-west-2)

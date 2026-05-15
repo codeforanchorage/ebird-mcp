@@ -56,6 +56,7 @@ Key design points future Claude should know before editing:
 - **Per-invocation plugin shutdown on Lambda.** `server/adapters/aws_lambda.py::_run_with_cleanup` calls `plugin_manager.shutdown()` after every request to avoid `"Event loop is closed"` errors from `httpx` when the Lambda execution context is reused. Each warm invocation re-initializes the eBird client. If cold-starts ever become a real problem, move the client to module scope and remove the shutdown — but understand the httpx/asyncio interaction first.
 - **Adapter responsibilities split.** `aws_lambda.py` handles event shape (API GW v1, v2, Function URL), base64 bodies, the 64 KB body cap, and OPTIONS preflight. Everything below it (CORS allowlist, JSON-RPC, plugin dispatch) is cloud-agnostic and lives in `server/http_handler.py` and `core/`.
 - **Hardening in the eBird plugin.** `plugins/ebird/plugin.py::_clamp_and_validate` enforces regex-validated `regionCode`/`speciesCode`/`locale` (path-injection defense), clamps numeric args (`back`, `maxResults`, `dist`, `lat`/`lng`) silently into eBird's accepted ranges, and rejects unknown `cat`/`fmt` values. Retries (`_RETRY`) are limited to two attempts on transport/read-timeout errors only — 4xx/5xx flow straight through.
+- **Bundled taxonomy.** `scripts/refresh_taxonomy.py` fetches the full eBird taxonomy (every `cat`) once at deploy time and writes it to `plugins/ebird/data/taxonomy.json` (gitignored). `ebird_client.py::get_taxonomy` serves the common case (`locale=en`, `fmt=json`) from that bundle via a module-level lazy cache, filtering by `cat` in-process. Non-English locales and `fmt=csv` fall through to the live API. The bundle is the single biggest eBird-quota saver — taxonomy lookups would otherwise be a per-conversation drain against the 1000/day cap. If the file is missing the plugin transparently falls back to live calls, so a refresh failure during deploy is non-fatal.
 - **Error responses are scrubbed.** `core/mcp_server.py::handle_request` mints a UUID `error_id`, logs the full exception to CloudWatch under that ID, and returns only `{"code": -32603, "message": "Internal error", "data": "Error ID: ..."}` to the client. Do not regress this by surfacing `str(e)` in responses.
 
 ## Files that matter
@@ -66,7 +67,8 @@ Key design points future Claude should know before editing:
 - `server/http_handler.py` — `ALLOWED_ORIGINS` CORS allowlist; config env-var loader.
 - `server/adapters/aws_lambda.py` — Lambda entry point; body size cap; per-invocation cleanup.
 - `plugins/ebird/plugin.py` — tool catalog (`get_tools`) + dispatch (`execute_tool`); hardening helpers.
-- `plugins/ebird/ebird_client.py` — thin httpx wrapper over eBird v2. Watch the endpoint paths: eBird is inconsistent — taxonomy lives under `/ref/taxonomy/ebird` but taxonomic *forms* live under `/ref/taxon/forms/{speciesCode}` (`taxon`, not `taxonomy`). The wrong path 404s for every species; don't "correct" `taxon` back to `taxonomy`.
+- `plugins/ebird/ebird_client.py` — thin httpx wrapper over eBird v2. Watch the endpoint paths: eBird is inconsistent — taxonomy lives under `/ref/taxonomy/ebird` but taxonomic *forms* live under `/ref/taxon/forms/{speciesCode}` (`taxon`, not `taxonomy`). The wrong path 404s for every species; don't "correct" `taxon` back to `taxonomy`. Also: `get_taxonomy` serves from `plugins/ebird/data/taxonomy.json` (the deploy-time bundle) when feasible; see the bundled-taxonomy bullet above.
+- `scripts/refresh_taxonomy.py` — fetches the full eBird taxonomy and writes the bundle. Run automatically by `scripts/deploy.sh` (Step 1.5). Can also be run manually for local dev: `python scripts/refresh_taxonomy.py`.
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
@@ -75,7 +77,7 @@ Key design points future Claude should know before editing:
 
 ## Files NOT under version control (rebuilt or local-only)
 
-`config.yaml`, `.mcp.json`, `terraform/aws/backend.tf`, `terraform/aws/config.yaml`, `lambda-deployment.zip`, `.deploy/`, `.terraform/`, `*.tfstate*`, `tfplan`. Their `.example` counterparts are committed; `scripts/setup-backend.sh` regenerates `backend.tf`; `scripts/deploy.sh` regenerates the zip and the copy of `config.yaml`.
+`config.yaml`, `.mcp.json`, `terraform/aws/backend.tf`, `terraform/aws/config.yaml`, `lambda-deployment.zip`, `.deploy/`, `.terraform/`, `*.tfstate*`, `tfplan`, `plugins/ebird/data/taxonomy.json`. Their `.example` counterparts are committed (where applicable); `scripts/setup-backend.sh` regenerates `backend.tf`; `scripts/deploy.sh` regenerates the zip, the copy of `config.yaml`, and refreshes `taxonomy.json` via `scripts/refresh_taxonomy.py`.
 
 ## Adding tools or new plugins
 

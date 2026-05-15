@@ -8,12 +8,91 @@ echoes those back in tool responses so the LLM cannot omit attribution
 or misreport what was asked.
 """
 
+import datetime as _dt
+import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+# Daily soft-gate against the upstream eBird quota (1000 calls/day). Per-warm-
+# container counter — multiple Lambda containers each track independently, so
+# the *aggregate* allowance is higher than the threshold below. This is
+# deliberate: the goal is friendly degradation (clear "try tomorrow" error
+# before eBird itself 429s mid-response), not exact quota accounting. WAF and
+# the bundled taxonomy do the heavy lifting; this is the last line of defense.
+DAILY_QUOTA_SOFT_LIMIT = 900
+_quota_state: Dict[str, Any] = {"date": None, "count": 0}
+
+
+class QuotaExhausted(Exception):
+    """Raised before an HTTP call when this container's daily counter has
+    hit DAILY_QUOTA_SOFT_LIMIT. The plugin catches this explicitly so the
+    user gets a clean 'try tomorrow' message instead of an upstream 429."""
+
+
+def _quota_check_and_bump() -> None:
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    if _quota_state["date"] != today:
+        _quota_state["date"] = today
+        _quota_state["count"] = 0
+    if _quota_state["count"] >= DAILY_QUOTA_SOFT_LIMIT:
+        raise QuotaExhausted(
+            "This eBird MCP server's daily upstream quota is nearly exhausted "
+            "(shared free instance, ~1000 eBird calls/day total). Please try "
+            "again after UTC midnight, or self-host your own instance for "
+            "uninterrupted access — see "
+            "https://github.com/codeforanchorage/ebird-mcp."
+        )
+    _quota_state["count"] += 1
+    # Periodic visibility in CloudWatch without log-spam on every call.
+    if _quota_state["count"] % 100 == 0:
+        logger.info(
+            "eBird upstream call count for this container today: %d / %d",
+            _quota_state["count"],
+            DAILY_QUOTA_SOFT_LIMIT,
+        )
+
+# Bundled taxonomy snapshot, refreshed at deploy time by
+# scripts/refresh_taxonomy.py. Serving get_taxonomy from this file saves the
+# eBird daily-quota call. eBird publishes new taxonomy ~annually, so a deploy
+# cadence is more than fresh enough.
+_BUNDLE_PATH = Path(__file__).parent / "data" / "taxonomy.json"
+_bundle_cache: Optional[List[Dict[str, Any]]] = None
+_bundle_load_attempted = False
+
+
+def _load_bundled_taxonomy() -> Optional[List[Dict[str, Any]]]:
+    """Module-level lazy load. Survives warm invocations within one Lambda
+    container; cold starts pay a one-time ~50–200 ms read+parse. Returns None
+    if the bundle is missing or unreadable, so callers can fall through to the
+    live API without a hard failure."""
+    global _bundle_cache, _bundle_load_attempted
+    if _bundle_cache is not None:
+        return _bundle_cache
+    if _bundle_load_attempted:
+        return None
+    _bundle_load_attempted = True
+
+    if not _BUNDLE_PATH.exists():
+        logger.info("Bundled taxonomy not present at %s; will use live API", _BUNDLE_PATH)
+        return None
+    try:
+        with open(_BUNDLE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list) or not data:
+            logger.warning("Bundled taxonomy has unexpected shape; ignoring")
+            return None
+        _bundle_cache = data
+        logger.info("Loaded bundled eBird taxonomy: %d entries", len(data))
+        return _bundle_cache
+    except Exception as e:
+        logger.warning("Failed to load bundled taxonomy: %s", e)
+        return None
 
 # A response envelope from the eBird API. Carrying the URL and params alongside
 # the data lets the plugin attach provenance without reconstructing the request.
@@ -51,6 +130,10 @@ class EBirdClient:
         Returns ``(body, full_url, clean_params)``. ``body`` is parsed JSON
         when ``accept_json`` is True, otherwise the raw response text.
         """
+        # Counted here so bundle-served paths (which never reach _get) don't
+        # consume the budget. Raises QuotaExhausted before any network I/O.
+        _quota_check_and_bump()
+
         clean_params: Dict[str, Any] = {}
         if params:
             for key, value in params.items():
@@ -246,6 +329,25 @@ class EBirdClient:
         cat: str = "species",
         fmt: str = "json",
     ) -> ApiResponse:
+        # Serve the common case (English JSON) from the bundled snapshot to
+        # save daily eBird quota. The bundle holds every category, so we filter
+        # in-process by `cat`. Non-English locales and CSV format fall through
+        # to the live API since the bundle is locale=en / fmt=json only.
+        if locale == "en" and fmt == "json":
+            bundle = _load_bundled_taxonomy()
+            if bundle is not None:
+                wanted = {c.strip() for c in cat.split(",") if c.strip()}
+                filtered = (
+                    [e for e in bundle if e.get("category") in wanted]
+                    if wanted
+                    else list(bundle)
+                )
+                return (
+                    filtered,
+                    f"{self.base_url}/ref/taxonomy/ebird",
+                    {"locale": locale, "cat": cat, "fmt": fmt},
+                )
+
         return await self._get(
             "/ref/taxonomy/ebird",
             params={"locale": locale, "cat": cat, "fmt": fmt},

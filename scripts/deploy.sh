@@ -88,6 +88,17 @@ EOF
 if [ $? -ne 0 ]; then exit 1; fi
 echo ""
 
+echo -e "${YELLOW}Step 1.5: Refreshing bundled eBird taxonomy...${NC}"
+# Best-effort: a failure here doesn't block the deploy. The plugin falls
+# through to the live eBird API when the bundle is missing — slower on
+# quota but still correct.
+if $PYTHON scripts/refresh_taxonomy.py; then
+    echo -e "${GREEN}Taxonomy bundle refreshed${NC}"
+else
+    echo -e "${YELLOW}Taxonomy refresh failed; deploying with whatever taxonomy.json is on disk (plugin will fall back to live API if missing)${NC}"
+fi
+echo ""
+
 echo -e "${YELLOW}Step 2: Packaging Lambda code...${NC}"
 PACKAGE_DIR=".deploy"
 rm -rf "$PACKAGE_DIR"

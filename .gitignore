@@ -36,6 +36,10 @@ config.yaml
 terraform/aws/lambda-deployment.zip
 terraform/aws/config.yaml
 
+# Bundled eBird taxonomy snapshot — refreshed at deploy time by
+# scripts/refresh_taxonomy.py. ~5-10 MB; rebuilt fresh on every deploy.
+plugins/ebird/data/taxonomy.json
+
 # Terraform — local state and account-specific backend wiring.
 # .terraform.lock.hcl IS intentionally NOT ignored; commit it so
 # provider versions are reproducible across machines.

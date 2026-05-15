@@ -35,7 +35,7 @@ from tenacity import (
 
 from core.interfaces import MCPPlugin, PluginType, ToolDefinition, ToolResult
 from plugins.ebird.config_schema import EBirdPluginConfig
-from plugins.ebird.ebird_client import EBirdClient
+from plugins.ebird.ebird_client import EBirdClient, QuotaExhausted
 
 logger = logging.getLogger(__name__)
 
@@ -453,6 +453,10 @@ class EBirdPlugin(MCPPlugin):
                 success=False,
                 error_message=f"Unknown tool: {tool_name}",
             )
+        except QuotaExhausted as e:
+            # Soft-gate trip — friendly message, no stack trace in logs.
+            logger.warning("Daily upstream quota soft-gate triggered: %s", e)
+            return ToolResult(content=[], success=False, error_message=str(e))
         except httpx.HTTPStatusError as e:
             body_excerpt = e.response.text[:500] if e.response is not None else ""
             msg = f"eBird API HTTP {e.response.status_code}: {body_excerpt}"
