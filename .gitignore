@@ -57,3 +57,6 @@ terraform/aws/backend.tf
 
 # Claude Code per-user / per-machine settings
 .claude/settings.local.json
+
+# MkDocs local build output (deployed via GitHub Actions to gh-pages branch)
+/site/
