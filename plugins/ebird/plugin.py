@@ -232,7 +232,10 @@ class EBirdPlugin(MCPPlugin):
                     "species in the region — one record per species, not a full feed. To find "
                     "what was seen at a specific place, pass that place's hotspot L-code as "
                     "regionCode; do NOT pull a whole county and filter the results by location "
-                    "(that undercounts — see the response caveats).\n\n" + workflow
+                    "(that undercounts — see the response caveats).\n\n"
+                    "For deep regional coverage, chain get_hotspots first to enumerate active "
+                    "L-codes, then call this tool with each as regionCode and aggregate.\n\n"
+                    + workflow
                 ),
                 input_schema={
                     "type": "object",
@@ -352,7 +355,9 @@ class EBirdPlugin(MCPPlugin):
                     "NOTE: eBird does not return per-hotspot checklist counts on this endpoint, "
                     "so species totals are not directly comparable across hotspots — a hotspot "
                     "with 200 species and 5000 checklists is different from one with 200 and 50. "
-                    "Use the last-observation date to gauge activity."
+                    "Use the last-observation date to gauge activity.\n\n"
+                    "For a deep regional snapshot, fan out to get_recent_observations(locId) per "
+                    "active hotspot (sort by latestObsDt to skip stale ones) and aggregate."
                 ),
                 input_schema={
                     "type": "object",
