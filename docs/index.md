@@ -59,16 +59,35 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
 
 === "ChatGPT"
 
-    **ChatGPT (Plus/Pro) custom connectors**
+    **ChatGPT custom MCP connectors (apps)**
 
-    1. In ChatGPT, go to **Settings → Connectors → Add custom connector** (availability depends on your plan and region).
-    2. Configure:
+    ChatGPT connects to remote MCP servers — like this one — over Streamable HTTP or SSE, exposed as a *custom app* / *custom connector*. Local stdio MCP servers will not work; you need the hosted HTTPS endpoint above.
+
+    !!! note "Availability"
+        Custom MCP connectors are plan- and feature-dependent (typically Team / Enterprise / Edu workspaces, sometimes Plus in deep-research contexts). The exact menu paths shift as OpenAI iterates — check OpenAI's current docs if anything below has moved.
+
+    **Workspace admin — one-time setup:**
+
+    Enable Developer Mode at **Workspace Settings → Permissions & Roles → Connected Data → Developer mode / Create custom MCP connectors**. Without this, members can't create connectors.
+
+    **Then any member can create the connector:**
+
+    1. In ChatGPT, open **Settings → Apps** (named "Connectors" in some plans).
+    2. Near **Advanced settings**, click **Create app**.
+    3. Fill in:
         - **Name**: `eBird MCP`
         - **MCP server URL**: `https://ebird.codeforanchorage.org/mcp`
         - **Authentication**: None
-    3. Enable the connector and start a new chat.
+    4. Save. The connector appears in your workspace's app/tool list. Admin-published connectors are visible to every member of the workspace automatically.
 
-    OpenAI's MCP-client surface has changed names a few times. If the menu in your account differs, see OpenAI's current docs: [platform.openai.com/docs](https://platform.openai.com/docs).
+    **Use it in a chat:**
+
+    Start a new conversation, click the **+** button next to the composer, choose **More**, then pick the eBird MCP app. From there: *"What rare birds have been seen near Anchorage this week?"* and ChatGPT will route to the appropriate eBird tool.
+
+    !!! tip "Going further with the Apps SDK"
+        If you want a richer in-ChatGPT experience — embedded cards, maps, tables, search widgets — the [OpenAI Apps SDK](https://platform.openai.com/docs) extends MCP with UI components. Start with a data-only connector (the path above), then add Apps-SDK UI later if it earns its place.
+
+    Reference: [platform.openai.com/docs](https://platform.openai.com/docs) for current ChatGPT connector and Apps SDK documentation.
 
 === "Gemini"
 
