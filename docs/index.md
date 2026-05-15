@@ -91,15 +91,64 @@ MCP support varies across vendors. Claude has the most mature end-user UI; ChatG
 
 === "Gemini"
 
-    **Gemini CLI / Gemini Code Assist**
+    **Gemini and remote MCP servers**
 
-    Google's consumer Gemini app doesn't yet expose user-facing MCP server configuration. Developer surfaces do:
+    Google's consumer Gemini web app (gemini.google.com) doesn't yet expose user-facing MCP server configuration. There are several workable paths today depending on how you use Gemini.
 
-    - **Gemini CLI**: add an `mcp_servers` entry pointing at the URL in your Gemini CLI config (`~/.gemini/config.yaml` or equivalent).
-    - **Gemini Code Assist** (VS Code / JetBrains): the MCP servers panel in the extension settings accepts a custom URL.
-    - **Vertex AI / Google AI Studio**: connect via the MCP tool integration when building an agent.
+    !!! info "No client-side API key needed"
+        This hosted endpoint's eBird API key lives server-side. Ignore any third-party setup instructions that tell you to set an `EBIRD_API_KEY` environment variable on the client — that's only relevant if you self-host your own copy.
 
-    Reference: [ai.google.dev](https://ai.google.dev) for current API documentation.
+    **A. MCP-compatible client running Gemini as the model**
+
+    Several MCP clients let you swap in Gemini as the underlying model while keeping a custom MCP server connection.
+
+    - **Cline** (VS Code extension): in settings, change *API Provider* to **Google AI Studio**, paste a free [Gemini API key](https://aistudio.google.com), then add a new MCP server with:
+        - **Connection type**: Streamable HTTP (use SSE if Streamable HTTP isn't offered)
+        - **URL**: `https://ebird.codeforanchorage.org/mcp`
+        - **Authentication**: None
+    - **LobeChat**: add a Gemini API key under *Settings → Language Model → Google*, then add the URL above as a custom MCP server in the Plugins/MCP tab.
+
+    **B. Gemini CLI and Gemini Code Assist**
+
+    - **[Gemini CLI](https://github.com/google-gemini/gemini-cli)** (Google's official command-line tool): add an entry to `mcpServers` in your CLI config pointing at the URL above.
+    - **Gemini Code Assist** (VS Code / JetBrains plugin): the MCP servers panel in extension settings accepts a custom URL.
+
+    **C. Python with the Google Gen AI SDK**
+
+    If you're building an agent, the official `google-genai` SDK accepts MCP tools directly. Sketch:
+
+    ```python
+    import asyncio
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+    from google import genai
+    from google.genai import types
+
+    URL = "https://ebird.codeforanchorage.org/mcp"
+
+    async def main():
+        async with streamablehttp_client(URL) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                gemini = genai.Client(api_key="YOUR_GEMINI_API_KEY")
+                response = gemini.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents="What rare birds have been seen near Anchorage this week?",
+                    config=types.GenerateContentConfig(tools=tools),
+                )
+                print(response.text)
+
+    asyncio.run(main())
+    ```
+
+    SDK versions are evolving fast; if `tools=tools` doesn't accept MCP tools directly in your version, convert MCP tool schemas to Gemini function declarations explicitly.
+
+    **D. Browser extensions (consumer Gemini web app)**
+
+    Third-party extensions like **MCP SuperAssistant** bridge remote MCP servers into the consumer Gemini web UI. Install the extension, paste the URL above into its configuration. Review extension permissions before installing — these tools inject scripts into your browser session.
+
+    Reference: [ai.google.dev](https://ai.google.dev) for Gemini API/SDK docs.
 
 === "Microsoft Copilot"
 
