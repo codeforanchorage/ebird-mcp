@@ -8,6 +8,8 @@ Runs on AWS Lambda + API Gateway + WAF. Deployable to your own AWS account in ab
 
 Built by [Code for Anchorage](https://codeforanchorage.org), modeled on the [OpenContext](https://github.com/CityOfBoston/OpenContext) / [anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) plugin architecture. Ports the tool surface of the upstream npm [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) stdio reference into a hosted HTTP endpoint so anyone can connect Claude via a URL — no local install required.
 
+**Overview and client setup guide:** <https://codeforanchorage.org/ebird-mcp/> — includes step-by-step instructions for connecting Claude, ChatGPT, Gemini, and Microsoft Copilot, plus fair-use guidance for the shared public endpoint.
+
 ## Try it (no deploy needed)
 
 Code for Anchorage runs a public instance:
