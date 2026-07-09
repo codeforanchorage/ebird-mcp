@@ -22,7 +22,12 @@ class MCPServer:
     # request, so every revision is served identically; negotiation just
     # echoes the client's requested version when we support it. Extend this
     # tuple (newest last) when a new spec revision ships.
-    SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
+    SUPPORTED_PROTOCOL_VERSIONS = (
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    )
 
     def __init__(self, plugin_manager: PluginManager) -> None:
         self.plugin_manager = plugin_manager

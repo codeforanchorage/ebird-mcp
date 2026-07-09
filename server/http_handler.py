@@ -104,6 +104,7 @@ class UniversalHTTPHandler:
     ALLOWED_ORIGINS = frozenset(
         {
             "https://claude.ai",
+            "https://claude.com",  # claude.ai -> claude.com domain migration
             "https://console.anthropic.com",
             "http://localhost:6274",
             "http://127.0.0.1:6274",
@@ -146,8 +147,81 @@ class UniversalHTTPHandler:
         start_time = time.perf_counter()
         request_id = request_id or "unknown"
 
-        incoming_session_id = headers.get("mcp-session-id") if headers else None
-        request_origin = headers.get("origin") if headers else None
+        # Normalize header names: the Lambda adapter lowercases them, but the
+        # local aiohttp server passes them through as sent (e.g. "Origin").
+        headers = {k.lower(): v for k, v in headers.items()} if headers else {}
+
+        incoming_session_id = headers.get("mcp-session-id")
+        request_origin = headers.get("origin")
+
+        # Spec (Streamable HTTP): servers MUST validate the Origin header to
+        # prevent DNS-rebinding attacks and MUST respond 403 when it is
+        # present and invalid. Non-browser clients send no Origin header.
+        if request_origin and request_origin not in self.ALLOWED_ORIGINS:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.warning(
+                f"403: Origin '{request_origin}' not in allowlist",
+                extra={
+                    "request_id": request_id,
+                    "request_path": path,
+                    "http_method": method,
+                    "origin": request_origin,
+                    "duration_ms": duration_ms,
+                },
+            )
+            error_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": "Forbidden",
+                        "data": "Origin not allowed",
+                    },
+                }
+            )
+            error_headers = {"Content-Type": "application/json; charset=utf-8"}
+            error_headers.update(self._get_cors_headers(request_origin))
+            return (403, error_headers, error_body)
+
+        # Spec (Streamable HTTP): a request carrying an invalid or
+        # unsupported MCP-Protocol-Version header MUST get 400 Bad Request.
+        # An absent header is fine (assume 2025-03-26 per spec; this server
+        # behaves identically across revisions).
+        protocol_version_header = headers.get("mcp-protocol-version")
+        if (
+            protocol_version_header
+            and protocol_version_header not in MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+        ):
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.warning(
+                f"400: Unsupported MCP-Protocol-Version '{protocol_version_header}'",
+                extra={
+                    "request_id": request_id,
+                    "request_path": path,
+                    "http_method": method,
+                    "mcp_protocol_version": protocol_version_header,
+                    "duration_ms": duration_ms,
+                },
+            )
+            error_body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32600,
+                        "message": "Bad Request",
+                        "data": (
+                            f"Unsupported MCP-Protocol-Version: "
+                            f"{protocol_version_header}. Supported: "
+                            f"{', '.join(MCPServer.SUPPORTED_PROTOCOL_VERSIONS)}"
+                        ),
+                    },
+                }
+            )
+            error_headers = {"Content-Type": "application/json; charset=utf-8"}
+            error_headers.update(self._get_cors_headers(request_origin))
+            return (400, error_headers, error_body)
 
         if path != "/mcp":
             duration_ms = (time.perf_counter() - start_time) * 1000
