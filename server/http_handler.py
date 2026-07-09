@@ -126,7 +126,12 @@ class UniversalHTTPHandler:
             "Access-Control-Allow-Origin": allow_origin,
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
-            "Access-Control-Allow-Headers": "content-type, accept, mcp-session-id",
+            # mcp-protocol-version: sent on every request by clients speaking
+            # protocol revision 2025-06-18+; must be allowed or browser
+            # preflights fail.
+            "Access-Control-Allow-Headers": (
+                "content-type, accept, mcp-session-id, mcp-protocol-version"
+            ),
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
         }
 

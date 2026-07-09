@@ -8,7 +8,7 @@ import importlib
 import inspect
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.interfaces import MCPPlugin, ToolResult
 from core.validators import ConfigurationError, get_enabled_plugin_config
@@ -174,6 +174,15 @@ class PluginManager:
             )
             error_msg = str(e) if str(e) else "Tool execution failed"
             return ToolResult(content=[], success=False, error_message=error_msg)
+
+    def get_instructions(self) -> Optional[str]:
+        """Collect server-level instructions from loaded plugins (usually one)."""
+        parts = []
+        for plugin in self.plugins.values():
+            text = plugin.get_instructions()
+            if text:
+                parts.append(text.strip())
+        return "\n\n".join(parts) or None
 
     def get_all_tools(self) -> List[Dict[str, Any]]:
         tools = []

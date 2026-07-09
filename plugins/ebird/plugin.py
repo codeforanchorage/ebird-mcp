@@ -137,6 +137,27 @@ class EBirdPlugin(MCPPlugin):
     async def health_check(self) -> bool:
         return self.client is not None and self._initialized
 
+    def get_instructions(self) -> str:
+        return (
+            "This server exposes the Cornell Lab's eBird v2 API: crowd-sourced "
+            "bird observations, hotspots, and taxonomy.\n\n"
+            "Workflow — chain tools, never guess identifiers:\n"
+            "1. Resolve the canonical 6-letter speciesCode with get_taxonomy "
+            "(or get_taxonomy_forms for subspecies/forms).\n"
+            "2. Resolve the place: use standard eBird region codes (US, US-AK, "
+            "US-AK-020) or find hotspot L-codes with get_hotspots / "
+            "get_nearby_hotspots; L-codes work anywhere a regionCode is accepted.\n"
+            "3. Query observations with the region/species/nearby tools.\n\n"
+            "Data caveats that apply to every tool:\n"
+            "- eBird is opt-in observation logging, not a systematic survey. Zero "
+            "records means 'not reported in this window', never 'absent'.\n"
+            "- 'Notable' means rare for that specific location; do not generalize "
+            "to regional or national rarity.\n"
+            "- If get_taxonomy_forms reports multiple forms for a species, "
+            "observers may have logged sightings under any form code — query each "
+            "before aggregating counts."
+        )
+
     # ---- Tool catalog -----------------------------------------------------
 
     def get_tools(self) -> List[ToolDefinition]:

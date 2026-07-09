@@ -18,6 +18,12 @@ logger = logging.getLogger(__name__)
 class MCPServer:
     """MCP Server that handles JSON-RPC requests."""
 
+    # Protocol revisions this server can speak. The server is stateless per
+    # request, so every revision is served identically; negotiation just
+    # echoes the client's requested version when we support it. Extend this
+    # tuple (newest last) when a new spec revision ships.
+    SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
+
     def __init__(self, plugin_manager: PluginManager) -> None:
         self.plugin_manager = plugin_manager
 
@@ -51,7 +57,8 @@ class MCPServer:
             elif method == "tools/call":
                 result = await self._handle_tools_call(params)
             elif method == "ping":
-                result = {"status": "ok"}
+                # Spec: ping result is an empty object.
+                result = {}
             elif method == "notifications/initialized":
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 logger.info(
@@ -73,7 +80,31 @@ class MCPServer:
                         },
                     )
                     return None
-                raise ValueError(f"Unknown method: {method}")
+                # JSON-RPC: unknown method is -32601, not an internal error.
+                # Clients probe for optional methods (resources/list, etc.);
+                # don't log those probes as server errors.
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                error = {
+                    "code": -32601,
+                    "message": "Method not found",
+                    "data": f"Unknown method: {method}",
+                }
+                response_log_data = format_jsonrpc_response_log(
+                    request_id=request_id,
+                    method=method,
+                    error=error,
+                    duration_ms=duration_ms,
+                )
+                if session_id:
+                    response_log_data["mcp_session_id"] = session_id
+                logger.warning(
+                    f"Unknown JSON-RPC method: {method}", extra=response_log_data
+                )
+                return {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": error,
+                }
 
             if is_notification:
                 duration_ms = (time.perf_counter() - start_time) * 1000
@@ -144,14 +175,28 @@ class MCPServer:
             return error_response
 
     async def _handle_initialize(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "protocolVersion": "2025-03-26",
+        # Version negotiation (spec): if we support the client's requested
+        # version, echo it back; otherwise answer with the latest we support
+        # and let the client decide whether to proceed or disconnect.
+        requested = params.get("protocolVersion")
+        if requested in self.SUPPORTED_PROTOCOL_VERSIONS:
+            negotiated = requested
+        else:
+            negotiated = self.SUPPORTED_PROTOCOL_VERSIONS[-1]
+        result = {
+            "protocolVersion": negotiated,
             "capabilities": {"tools": {}},
             "serverInfo": {
                 "name": "ebird-mcp",
                 "version": "1.0.0",
             },
         }
+        instructions = (
+            self.plugin_manager.get_instructions() if self.plugin_manager else None
+        )
+        if instructions:
+            result["instructions"] = instructions
+        return result
 
     async def _handle_tools_list(self) -> Dict[str, Any]:
         tools = self.plugin_manager.get_all_tools()
@@ -210,6 +255,32 @@ class MCPServer:
                 ),
             }
 
+        # JSON-RPC batching was removed in protocol revision 2025-06-18 and
+        # was never supported here. Reject arrays (and any other non-object
+        # payload) with -32600 instead of crashing to a 500.
+        if not isinstance(request, dict):
+            logger.warning(
+                "Rejected non-object JSON-RPC payload (batching is not supported)",
+                extra={"payload_type": type(request).__name__},
+            )
+            return {
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json; charset=utf-8"},
+                "body": json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {
+                            "code": -32600,
+                            "message": "Invalid Request",
+                            "data": "Request must be a single JSON-RPC object; "
+                            "batching is not supported",
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+
         session_id = None
         if headers:
             session_id = headers.get("mcp-session-id") or headers.get("Mcp-Session-Id")
@@ -217,8 +288,9 @@ class MCPServer:
         response = await self.handle_request(request, session_id=session_id)
 
         if response is None:
+            # Streamable HTTP spec: notifications get 202 Accepted, no body.
             return {
-                "statusCode": 200,
+                "statusCode": 202,
                 "headers": {"Content-Type": "application/json; charset=utf-8"},
                 "body": "",
             }

@@ -68,6 +68,14 @@ class MCPPlugin(ABC):
         """Clean up plugin resources."""
         pass
 
+    def get_instructions(self) -> Optional[str]:
+        """Server-level usage guidance surfaced in the MCP initialize response.
+
+        Optional. Return a short plain-text guide (workflow, data caveats)
+        for LLM clients; return None to omit the `instructions` field.
+        """
+        return None
+
     @abstractmethod
     def get_tools(self) -> List[ToolDefinition]:
         """Get list of tools provided by this plugin.
