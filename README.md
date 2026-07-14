@@ -69,7 +69,9 @@ Claude / MCP client
                           -> plugins.ebird.ebird_client.EBirdClient -> api.ebird.org
 ```
 
-The hand-rolled JSON-RPC dispatcher implements MCP `initialize`, `tools/list`, `tools/call`, `ping`, and `notifications/initialized`. No MCP SDK; no Lambda Web Adapter; no SSE. Each Lambda invocation handles one request/response cycle. `Mcp-Session-Id` is generated on initialize and echoed back for log correlation only — the server is stateless.
+The hand-rolled JSON-RPC dispatcher implements MCP `initialize`, `tools/list`, `tools/call`, `ping`, and `notifications/initialized`. No MCP SDK; no Lambda Web Adapter; no SSE. Each Lambda invocation handles one request/response cycle. `Mcp-Session-Id` is generated on initialize and echoed back for log correlation only — the server is stateless, and clients may skip `initialize` entirely and call `tools/*` directly, as newer spec revisions allow.
+
+Protocol version is negotiated per the spec: the server supports every revision from `2024-11-05` through `2025-11-25` and echoes the client's requested version when it's supported, otherwise answers with the newest it knows. Streamable HTTP transport MUSTs are enforced in `server/http_handler.py`: requests with an Origin header outside the allowlist get 403, an unsupported `MCP-Protocol-Version` header gets 400 (absent is fine), and JSON-RPC batch arrays get 400 (batching was removed from the spec in 2025-06-18). `initialize` also returns an `instructions` field — an LLM-facing usage guide sourced from the plugin's `get_instructions()`.
 
 ## Repo layout
 
@@ -83,6 +85,7 @@ terraform/aws/        Terraform IaC: Lambda, API GW, WAF, alarms, access logs
 scripts/
   deploy.sh           build .deploy/, zip, terraform apply
   setup-backend.sh    create S3 + DynamoDB backend (one-time)
+  refresh_taxonomy.py fetch the full eBird taxonomy into plugins/ebird/data/taxonomy.json
   test_streamable_http.sh  smoke test: initialize, list, call
 local_server.py       aiohttp wrapper for local testing on http://localhost:8000/mcp
 stdio_bridge.py       stdio<->HTTP bridge for stdio-only MCP clients
@@ -137,10 +140,11 @@ bash ./scripts/test_streamable_http.sh
 
 The script will:
 1. Validate that exactly one plugin is enabled and that the eBird key is set.
-2. Build `.deploy/` with all dependencies installed for `x86_64-manylinux2014` / Python 3.11.
-3. Zip into `lambda-deployment.zip` and copy it (and `config.yaml`) into `terraform/aws/`.
-4. Run `terraform plan` with the chosen `*.tfvars`, prompt for confirmation, then `terraform apply`.
-5. Print the public MCP endpoint URL.
+2. Refresh the bundled eBird taxonomy (`scripts/refresh_taxonomy.py` → `plugins/ebird/data/taxonomy.json`) so common taxonomy lookups are served from the deployment package instead of burning eBird API quota. A refresh failure is non-fatal — the plugin falls back to live API calls.
+3. Build `.deploy/` with all dependencies installed for `x86_64-manylinux2014` / Python 3.11.
+4. Zip into `lambda-deployment.zip` and copy it (and `config.yaml`) into `terraform/aws/`.
+5. Run `terraform plan` with the chosen `*.tfvars`, prompt for confirmation, then `terraform apply`.
+6. Print the public MCP endpoint URL.
 
 Paste that URL into Claude (Settings → Connectors → Add custom connector). Done.
 
@@ -188,10 +192,11 @@ logging:
 ## Operational notes
 
 - **Stateless.** `Mcp-Session-Id` is for log correlation; the server stores no per-session state. Horizontally scalable.
-- **CORS.** The Lambda's `UniversalHTTPHandler` allowlist accepts `https://claude.ai`, `https://console.anthropic.com`, and the MCP Inspector on `localhost:6274`. Edit `server/http_handler.py::ALLOWED_ORIGINS` to add more.
-- **Rate limits.** Defaults in `prod.tfvars`: WAF 300 req/IP/5min, API GW 5 rps / 10 burst / 3000/day. Tune for your traffic.
-- **Cold-start cleanup.** The Lambda adapter shuts down the plugin manager after every invocation to avoid `"Event loop is closed"` errors with httpx. This means each invocation re-initializes the eBird client (one `taxonomy/forms` smoke call). At Lambda concurrency this is fine; if cold-starts become a problem, keep the client at module scope and remove the shutdown in `_run_with_cleanup`.
-- **MCP protocol version advertised.** `"2025-03-26"` — bump in `core/mcp_server.py::_handle_initialize` if Claude Connectors moves on.
+- **CORS / Origin validation.** The Lambda's `UniversalHTTPHandler` allowlist accepts `https://claude.ai`, `https://claude.com`, `https://console.anthropic.com`, and the MCP Inspector on `localhost:6274`. Browser requests from any other Origin get 403; non-browser clients (including claude.ai's backend connector, which sends no Origin header) are unaffected. Edit `server/http_handler.py::ALLOWED_ORIGINS` to add more.
+- **Rate limits.** Defaults in `prod.tfvars`: WAF 50 req/IP per 5 min (sized against the upstream eBird 1000-calls/day quota, not AWS capacity), API GW 20 rps sustained / 40 burst / 50,000 per day. Tune for your traffic.
+- **Bundled taxonomy.** The deploy script bakes the full eBird taxonomy into the Lambda package; `get_taxonomy` calls with `locale=en` / `fmt=json` are served from the bundle instead of the live API. This is the single biggest saver against the 1000-calls/day eBird quota. Non-English locales and CSV fall through to the live API.
+- **Cold-start cleanup.** The Lambda adapter shuts down the plugin manager after every invocation to avoid `"Event loop is closed"` errors with httpx. This means each invocation re-initializes the eBird client. At Lambda concurrency this is fine; if cold-starts become a problem, keep the client at module scope and remove the shutdown in `_run_with_cleanup`.
+- **MCP protocol versions.** Negotiated per the spec — `2024-11-05` through `2025-11-25` are supported (`core/mcp_server.py::SUPPORTED_PROTOCOL_VERSIONS`); append newer revisions to that tuple as they ship, after checking their transport requirements against `server/http_handler.py`.
 
 ## Cost
 
@@ -224,6 +229,7 @@ The following files contain secrets or account-specific data and are gitignored:
 | `.mcp.json` | eBird API key (stdio fallback) | `.mcp.json.example` |
 | `terraform/aws/backend.tf` | Your AWS account ID, S3 bucket | `terraform/aws/backend.tf.example` (regenerated by `scripts/setup-backend.sh`) |
 | `terraform/aws/config.yaml`, `lambda-deployment.zip` | Build artifacts | rebuilt by `scripts/deploy.sh` |
+| `plugins/ebird/data/taxonomy.json` | Bundled eBird taxonomy (~7 MB) | rebuilt by `scripts/refresh_taxonomy.py` (deploy runs it automatically) |
 | `.terraform/`, `*.tfstate*`, `tfplan` | Local Terraform state | state lives in S3 |
 
 Before your first push, run this from Git Bash to verify nothing slipped through:
@@ -240,11 +246,11 @@ git ls-files | xargs grep -l "$(grep '^    api_key:' config.yaml | sed 's/.*"\(.
 
 If the grep prints any file, that file contains your real key and needs to be either edited or added to `.gitignore` before commit.
 
-## Credits
+## Credits and thanks
 
-- Architecture cloned from [codeforanchorage/anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) and [CityOfBoston/OpenContext](https://github.com/CityOfBoston/OpenContext). MIT-licensed.
-- Tool surface ported from [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server).
-- Data from the [eBird API](https://documenter.getpostman.com/view/664302/S1ENwy59) — please follow eBird's [terms of use](https://ebird.org/news/please-share-your-data-with-ebird).
+- A huge thank you to the **City of Boston** — especially CIO **Santi Garces**, whose push to open city data to AI agents via MCP ([OpenContext](https://github.com/CityOfBoston/OpenContext)) showed cities how to do this, and **Srihari Raman**, OpenContext's author at Boston's Department of Innovation and Technology. This project's plugin architecture is cloned directly from OpenContext (via [codeforanchorage/anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp)). MIT-licensed.
+- Tool surface ported from [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) by Ciara Adkins.
+- Data from the [eBird API](https://documenter.getpostman.com/view/664302/S1ENwy59), by the Cornell Lab of Ornithology — please follow eBird's [terms of use](https://ebird.org/news/please-share-your-data-with-ebird).
 
 ## License
 
