@@ -226,6 +226,9 @@ The server exposes the same tool surface as the JS reference `ebird-mcp-server`,
 | `get_taxonomy` | eBird species codes, scientific and common names, taxonomy |
 | `get_taxonomy_forms` | Subspecies and form codes for a species |
 
+!!! note "Tool names in your client"
+    Clients show these tools with an `ebird__` prefix (e.g. `ebird__get_recent_observations`) — the server namespaces every tool by plugin automatically.
+
 Every response includes the upstream eBird URL it came from, the parameters sent, and a UTC retrieved-at timestamp — so your AI can attribute the data and you can verify it.
 
 The server also adds civic-AI safety caveats: it flags single-observer claims, absence-of-evidence patterns (eBird is opt-in, "no records" usually means "no birders looked"), region-deduped result misuse, notable-is-local rarity, and taxonomic ambiguity for hybrids and subspecies. These exist because LLMs answering questions about wildlife data are prone to over-confident pattern claims from sparse data.
@@ -267,13 +270,34 @@ bash ./scripts/deploy.sh --environment prod
 You'll need:
 
 - A free [eBird API key](https://ebird.org/api/keygen) (instant signup).
-- An AWS account. The stack is API Gateway + Lambda + WAFv2 + CloudWatch — all on the AWS free tier or close to it. Estimated cost under moderate load: a few dollars per month.
-- [Terraform](https://www.terraform.io/downloads) and Python 3.11 installed locally.
+- An AWS account with the [AWS CLI](https://aws.amazon.com/cli/) configured (`aws configure`).
+- [Terraform](https://www.terraform.io/downloads) >= 1.0 and Python 3.11+ installed locally.
 
-The deploy script handles packaging, the Lambda zip, and a `terraform apply`. Full architecture and operational notes are in the [repo README](https://github.com/codeforanchorage/ebird-mcp) and `CLAUDE.md`.
+**Cost:** roughly **$6–8/month** at typical use (mostly the $5 WAF ACL), with a hard ceiling around **$25/month** — the default 50,000 requests/day API Gateway quota caps worst-case spend even under a viral spike or denial-of-wallet attack. Lambda itself stays inside the AWS perpetual free tier at conversational traffic. Full cost table in the [repo README](https://github.com/codeforanchorage/ebird-mcp#cost).
+
+The deploy script handles everything else: it validates your config, bundles the full eBird taxonomy into the package (so common taxonomy lookups never touch your eBird quota), builds the Lambda zip, and runs `terraform apply`. Full architecture and operational notes are in the [repo README](https://github.com/codeforanchorage/ebird-mcp) and `CLAUDE.md`.
+
+!!! tip "Test locally before deploying"
+    You don't need AWS to try the code: `pip install -r requirements.txt`, then `python local_server.py` serves the identical MCP endpoint on `http://localhost:8000/mcp`. Point the MCP Inspector or any local client at it.
+
+---
+
+## Fork it for your own data source
+
+eBird is just the first plugin. The framework underneath is a general-purpose hosted-MCP scaffold — plugin discovery, JSON-RPC dispatch, CORS/Origin hardening, WAF + rate limiting, CloudWatch alarms, and one-command Terraform deploy are all data-source-agnostic. If you have a REST API you want to expose to AI assistants (a GIS feature service, an open-data portal, a domain dataset), forking this repo gets you a production-ready hosted MCP server where you only write the tool layer:
+
+1. Fork the repo and add `plugins/<your_name>/plugin.py` exporting a class that inherits from `MCPPlugin` — define your tools in `get_tools()`, dispatch them in `execute_tool()`, and put your API client alongside.
+2. In `config.yaml`, set `enabled: true` on your plugin (and only yours — one fork = one MCP server, enforced at load time).
+3. Deploy. The framework discovers the plugin, namespaces its tools, and serves it — no other code changes.
+
+The eBird plugin (`plugins/ebird/`) is the worked example: study its input validation (regex-checked path parameters, clamped numeric ranges), response provenance, and LLM-facing caveats before writing your own.
+
+This architecture is itself a fork lineage: it comes from the City of Boston's [OpenContext](https://github.com/CityOfBoston/OpenContext) via [anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) — cities and civic-tech brigades adapting the same scaffold to their own data. Yours can be next.
 
 ---
 
 ## Project
 
 Maintained by [Code for Anchorage](https://codeforanchorage.org). Source code and issue tracker on [GitHub](https://github.com/codeforanchorage/ebird-mcp). Built on the [Model Context Protocol](https://modelcontextprotocol.io) and [eBird API v2](https://documenter.getpostman.com/view/664302/S1ENwy59). eBird data © Cornell Lab of Ornithology, made available under eBird's [terms of use](https://www.birds.cornell.edu/home/ebird-data-access-terms-of-use/).
+
+With thanks to the **City of Boston** — CIO **Santi Garces** and OpenContext author **Srihari Raman** — whose [OpenContext](https://github.com/CityOfBoston/OpenContext) project pioneered the plugin architecture this server is built on, and to **Ciara Adkins**, whose [moonbirdai/ebird-mcp-server](https://github.com/moonbirdai/ebird-mcp-server) defined the original eBird tool surface.
