@@ -249,7 +249,7 @@ If the grep prints any file, that file contains your real key and needs to be ei
 ## Credits and thanks
 
 - A huge thank you to the **City of Boston** — especially CIO **Santi Garces**, whose push to open city data to AI agents via MCP ([OpenContext](https://github.com/CityOfBoston/OpenContext)) showed cities how to do this, and **Srihari Raman**, OpenContext's author at Boston's Department of Innovation and Technology. This project's plugin architecture is cloned directly from OpenContext (via [codeforanchorage/anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp)). MIT-licensed.
-- Tool surface ported from [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) by Ciara Adkins.
+- Tool surface ported from [moonbirdai/ebird-mcp-server](https://github.com/moonbirdai/ebird-mcp-server) by Ciara Adkins (published on npm as [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server)) — thank you for the original stdio implementation this hosted port is built on.
 - Data from the [eBird API](https://documenter.getpostman.com/view/664302/S1ENwy59), by the Cornell Lab of Ornithology — please follow eBird's [terms of use](https://ebird.org/news/please-share-your-data-with-ebird).
 
 ## License
