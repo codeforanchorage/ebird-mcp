@@ -32,7 +32,7 @@ Prefer to verify it's up before adding a connector?
 curl -sS https://ebird.codeforanchorage.org/mcp \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
-# {"jsonrpc": "2.0", "id": 1, "result": {"status": "ok"}}
+# {"jsonrpc": "2.0", "id": 1, "result": {}}
 ```
 
 The public endpoint is rate-limited (currently 50,000 requests/day, 20 rps sustained per the production tfvars). If you expect heavy usage or want isolation from other users sharing the rate limits, deploy your own copy — instructions below.
