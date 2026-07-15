@@ -435,6 +435,178 @@ class ObservationRenderingTests(_TimeFrozenTest):
         self.assertIn("Observer: anonymous", text)
 
 
+# ---- Compact table format for large results --------------------------------
+
+
+class CompactFormatTests(_TimeFrozenTest):
+    """Above _COMPACT_FORMAT_THRESHOLD records, observations render as a
+    pipe-delimited table; at or below it, the readable block format stays."""
+
+    async def test_block_format_at_threshold(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(20),
+        )
+        self.assertIn("Species: American Crow", text)
+        self.assertNotIn("compact table", text)
+
+    async def test_compact_format_above_threshold(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(21),
+        )
+        self.assertIn("21 observations — compact table", text)
+        self.assertIn("Species [code] | Date | Count | Location (locId)", text)
+        self.assertIn("American Crow [amecro] | 2026-05-12T09:15 | 2", text)
+        # Block-format labels must not leak into the table.
+        self.assertNotIn("Species: American Crow", text)
+
+    async def test_compact_preserves_provenance_and_caveats(self) -> None:
+        p = _make_plugin()
+        url = f"{_BASE_URL}/data/obs/US-NY/recent"
+        text = await _run(
+            p, "get_recent_observations",
+            {"regionCode": "US-NY", "maxResults": 100},
+            _fake_obs(100), url=url, params={"back": 14, "maxResults": 100},
+        )
+        self.assertTrue(text.startswith(f"Source: {url}"), text[:200])
+        self.assertIn("Query: back=14, maxResults=100", text)
+        self.assertIn("POSSIBLY TRUNCATED", text)
+        self.assertIn("ONE-RECORD-PER-SPECIES", text)
+        self.assertRegex(text, r"_Retrieved: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_$")
+
+    async def test_compact_distance_column_for_nearby(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_nearby_observations",
+            {"lat": 40.7128, "lng": -74.0060},
+            _fake_obs(25, lat=40.7128, lng=-73.0000),
+        )
+        self.assertIn("| Km |", text)
+        self.assertRegex(text, r"\| \d+\.\d \| confirmed \|")
+
+    async def test_compact_observer_column_when_configured(self) -> None:
+        p = _make_plugin(include_observer_name=True)
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(25, user_display_name="Jane Doe"),
+        )
+        self.assertIn("| Observer", text)
+        self.assertIn("| Jane Doe", text)
+
+    async def test_compact_observer_hidden_by_default(self) -> None:
+        p = _make_plugin(include_observer_name=False)
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(25, user_display_name="Jane Doe"),
+        )
+        self.assertNotIn("Jane Doe", text)
+
+    async def test_compact_checklist_ids_with_url_recipe(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(25, sub_ids=[f"S{i}" for i in range(25)]),
+        )
+        self.assertIn("https://ebird.org/checklist/", text)  # recipe in header
+        self.assertIn("| S24", text)
+
+    async def test_compact_taxonomy_legend_when_flagged_records(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(25, com_name="Greater/Lesser Yellowlegs"),
+        )
+        self.assertIn("⚠️ TAXONOMY", text)
+        self.assertIn("do not count them toward species totals", text)
+
+    async def test_compact_no_taxonomy_legend_for_clean_species(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(25),
+        )
+        self.assertNotIn("⚠️ TAXONOMY", text)
+
+    async def test_hotspots_compact_above_threshold(self) -> None:
+        p = _make_plugin()
+        hotspots = [
+            {
+                "locId": f"L{i}",
+                "locName": f"Spot {i}",
+                "lat": 40.0,
+                "lng": -73.0,
+                "numSpeciesAllTime": 100 + i,
+                "latestObsDt": "2026-05-10 09:00",
+            }
+            for i in range(30)
+        ]
+        text = await _run(p, "get_hotspots", {"regionCode": "US-NY"}, hotspots)
+        self.assertIn("30 hotspots — compact table", text)
+        self.assertIn("Hotspot (locId) | Lat,Lng | Species all-time | Last obs", text)
+        self.assertIn("Spot 3 (L3) | 40.0,-73.0 | 103 | 2026-05-10T09:00 (3d ago)", text)
+
+    async def test_hotspots_block_format_at_threshold(self) -> None:
+        p = _make_plugin()
+        hotspots = [
+            {"locId": f"L{i}", "locName": f"Spot {i}", "lat": 40.0, "lng": -73.0}
+            for i in range(20)
+        ]
+        text = await _run(p, "get_hotspots", {"regionCode": "US-NY"}, hotspots)
+        self.assertIn("Hotspot: Spot 0", text)
+        self.assertNotIn("compact table", text)
+
+    def test_pipe_in_field_values_escaped(self) -> None:
+        self.assertEqual(plugin_module._table_cell("a|b\nc"), "a/b c")
+
+
+# ---- Response byte ceiling ---------------------------------------------------
+
+
+class SizeCeilingTests(_TimeFrozenTest):
+    """The byte backstop truncates at a record boundary with an explicit
+    notice — never silently, never mid-record."""
+
+    async def test_ceiling_truncates_with_notice(self) -> None:
+        p = _make_plugin()
+        with patch.object(plugin_module, "_MAX_BODY_BYTES", 2000):
+            text = await _run(
+                p, "get_recent_observations", {"regionCode": "US-NY"},
+                _fake_obs(100),
+            )
+        self.assertIn("RESPONSE SIZE CEILING", text)
+        self.assertRegex(text, r"showing \d+ of 100 records")
+        # Provenance survives truncation.
+        self.assertIn("Source:", text)
+        self.assertRegex(text, r"_Retrieved: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z_$")
+
+    async def test_ceiling_applies_to_block_format_too(self) -> None:
+        p = _make_plugin()
+        with patch.object(plugin_module, "_MAX_BODY_BYTES", 600):
+            text = await _run(
+                p, "get_recent_observations", {"regionCode": "US-NY"},
+                _fake_obs(10),  # ≤20 → block format
+            )
+        self.assertIn("RESPONSE SIZE CEILING", text)
+
+    async def test_no_notice_under_ceiling(self) -> None:
+        p = _make_plugin()
+        text = await _run(
+            p, "get_recent_observations", {"regionCode": "US-NY"},
+            _fake_obs(100),
+        )
+        self.assertNotIn("RESPONSE SIZE CEILING", text)
+
+    def test_first_record_always_shown_even_if_oversized(self) -> None:
+        # A single block larger than the cap must still render (with no
+        # infinite loop and no empty body).
+        with patch.object(plugin_module, "_MAX_BODY_BYTES", 10):
+            out = plugin_module._join_with_size_cap(["x" * 100], sep="\n")
+        self.assertEqual(out, "x" * 100)
+
+
 # ---- Distance for nearby tools --------------------------------------------
 
 

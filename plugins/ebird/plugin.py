@@ -95,6 +95,15 @@ _SMALL_SAMPLE_THRESHOLD = 10           # below this many records → SMALL SAMPL
 _LOW_EFFORT_CHECKLIST_THRESHOLD = 5    # below this many unique checklists → LOW SURVEY EFFORT
 _STALE_WINDOW_MIN_DAYS = 3             # below this, freshness noise dominates
 
+# Response-size controls. eBird itself accepts maxResults up to 10000, but at
+# ~100-350 bytes per rendered record that is a multi-megabyte response no MCP
+# client has a good use for. The schema max and clamp ceiling live here; the
+# byte ceiling is a backstop independent of record count (long location names,
+# observer fields) so a single response can never balloon past it.
+_MAX_RESULTS_CEILING = 1000            # schema maximum + clamp ceiling for maxResults
+_COMPACT_FORMAT_THRESHOLD = 20         # above this many records → compact table
+_MAX_BODY_BYTES = 200 * 1024           # formatted-body byte ceiling (truncates at a record boundary)
+
 
 _RETRY = retry(
     stop=stop_after_attempt(2),
@@ -207,9 +216,13 @@ class EBirdPlugin(MCPPlugin):
         }
         max_results = {
             "type": "integer",
-            "description": "Maximum number of results to return (1-10000). Default: 100.",
+            "description": (
+                f"Maximum number of results to return (1-{_MAX_RESULTS_CEILING}). "
+                f"Default: 100. For larger sets, narrow with back/dist and "
+                f"aggregate across calls."
+            ),
             "minimum": 1,
-            "maximum": 10000,
+            "maximum": _MAX_RESULTS_CEILING,
         }
         include_provisional = {
             "type": "boolean",
@@ -679,7 +692,9 @@ def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     if out.get("back") is not None:
         out["back"] = _clamp_int(out["back"], 1, 30, "back")
     if out.get("maxResults") is not None:
-        out["maxResults"] = _clamp_int(out["maxResults"], 1, 10000, "maxResults")
+        out["maxResults"] = _clamp_int(
+            out["maxResults"], 1, _MAX_RESULTS_CEILING, "maxResults"
+        )
     if out.get("dist") is not None:
         out["dist"] = _clamp_int(out["dist"], 0, 50, "dist")
 
@@ -1009,6 +1024,14 @@ def _format_observations(
     query_lat = arguments.get("lat") if tool_name in _NEARBY_OBSERVATION_TOOLS else None
     query_lng = arguments.get("lng") if tool_name in _NEARBY_OBSERVATION_TOOLS else None
 
+    if len(observations) > _COMPACT_FORMAT_THRESHOLD:
+        return _format_observations_compact(
+            observations,
+            include_observer=include_observer,
+            query_lat=query_lat,
+            query_lng=query_lng,
+        )
+
     blocks = [
         _format_obs_block(
             obs,
@@ -1018,7 +1041,7 @@ def _format_observations(
         )
         for obs in observations
     ]
-    return "\n\n".join(blocks)
+    return _join_with_size_cap(blocks, sep="\n\n")
 
 
 def _format_obs_block(
@@ -1146,6 +1169,137 @@ def _taxonomy_flag_for(com_name: Any) -> str:
     return ""
 
 
+# ---- Compact rendering + size backstop -------------------------------------
+
+
+def _join_with_size_cap(blocks: List[str], *, sep: str) -> str:
+    """Join pre-formatted record blocks, truncating at a record boundary if
+    the joined text would exceed ``_MAX_BODY_BYTES``. Truncation is never
+    silent — a house-style notice replaces the dropped records."""
+    total = len(blocks)
+    sep_bytes = len(sep.encode("utf-8"))
+    out: List[str] = []
+    size = 0
+    for block in blocks:
+        added = len(block.encode("utf-8")) + (sep_bytes if out else 0)
+        if size + added > _MAX_BODY_BYTES and out:
+            shown = len(out)
+            out.append(
+                f"⚠️ RESPONSE SIZE CEILING: showing {shown} of {total} records "
+                f"— the formatted response hit this server's "
+                f"{_MAX_BODY_BYTES // 1024} KB backstop. The remaining "
+                f"{total - shown} records were returned by eBird but not "
+                f"rendered. Re-run with a smaller back, dist, or maxResults "
+                f"for a complete, narrower result."
+            )
+            break
+        out.append(block)
+        size += added
+    return sep.join(out)
+
+
+def _table_cell(value: Any) -> str:
+    """Render a value for a pipe-delimited table row: pipes and newlines in
+    field values would corrupt the row structure, so replace them."""
+    return str(value).replace("|", "/").replace("\n", " ")
+
+
+def _review_label_compact(obs: Dict[str, Any]) -> str:
+    """Short review labels for table rows; same semantics as _review_label."""
+    reviewed = obs.get("obsReviewed")
+    valid = obs.get("obsValid")
+    if reviewed is True and valid is True:
+        return "confirmed"
+    if reviewed is True and valid is False:
+        return "REJECTED"
+    if reviewed is False:
+        return "unreviewed"
+    return "?"
+
+
+def _format_observations_compact(
+    observations: List[Dict[str, Any]],
+    *,
+    include_observer: bool,
+    query_lat: Optional[float],
+    query_lng: Optional[float],
+) -> str:
+    """Pipe-delimited table for large observation sets. The block format at
+    ~325 bytes/record makes big responses multi-megabyte; rows keep the same
+    facts (species, date, count, location, coords, review, checklist) at a
+    fraction of the size. Small results stay on the block format, which
+    reads better."""
+    has_distance = query_lat is not None and query_lng is not None
+
+    columns = ["Species [code]", "Date", "Count", "Location (locId)", "Lat,Lng"]
+    if has_distance:
+        columns.append("Km")
+    columns += ["Review", "Checklist"]
+    if include_observer:
+        columns.append("Observer")
+
+    rows: List[str] = []
+    any_taxonomy_flag = False
+    for obs in observations:
+        com = obs.get("comName", "?")
+        code = obs.get("speciesCode")
+        species = f"{com} [{code}]" if code else str(com)
+        if _taxonomy_flag_for(com):
+            any_taxonomy_flag = True
+
+        count = obs["howMany"] if obs.get("howMany") is not None else "present"
+        coords = (
+            f"{obs['lat']},{obs['lng']}"
+            if obs.get("lat") is not None and obs.get("lng") is not None
+            else "?"
+        )
+        cells: List[Any] = [
+            species,
+            _format_date(obs.get("obsDt")),
+            count,
+            f"{obs.get('locName', '?')} ({obs.get('locId', '?')})",
+            coords,
+        ]
+        if has_distance:
+            km = "?"
+            if obs.get("lat") is not None and obs.get("lng") is not None:
+                try:
+                    km = "{:.1f}".format(
+                        _haversine_km(
+                            float(query_lat),
+                            float(query_lng),
+                            float(obs["lat"]),
+                            float(obs["lng"]),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    pass
+            cells.append(km)
+        cells.append(_review_label_compact(obs))
+        cells.append(obs.get("subId") or "?")
+        if include_observer:
+            cells.append(obs.get("userDisplayName") or "anonymous")
+
+        rows.append(" | ".join(_table_cell(c) for c in cells))
+
+    header: List[str] = [
+        f"{len(observations)} observations — compact table, one record per "
+        f"line. Checklist column: append the ID to "
+        f"https://ebird.org/checklist/ for the full checklist. Review "
+        f"column: 'unreviewed' records may be misidentifications; 'REJECTED' "
+        f"means a reviewer rejected the record."
+    ]
+    if any_taxonomy_flag:
+        header.append(
+            "⚠️ TAXONOMY: rows whose species name contains '(hybrid)', "
+            "'sp.', a slash, or a parenthetical form are not confirmed "
+            "single-species records — do not count them toward species totals."
+        )
+    header.append("")
+    header.append(" | ".join(columns))
+    return "\n".join(header) + "\n" + _join_with_size_cap(rows, sep="\n")
+
+
 def _empty_observation_body(tool_name: str, arguments: Dict[str, Any]) -> str:
     """Body text for an empty observation result. Frames absence as
     sampling, not biology — eBird is opt-in, so 'no records' usually means
@@ -1207,6 +1361,11 @@ def _format_hotspots(
     query_lat = arguments.get("lat") if nearby else None
     query_lng = arguments.get("lng") if nearby else None
 
+    if len(hotspots) > _COMPACT_FORMAT_THRESHOLD:
+        return _format_hotspots_compact(
+            hotspots, query_lat=query_lat, query_lng=query_lng
+        )
+
     blocks: List[str] = []
     for h in hotspots:
         name = h.get("locName") or f"Hotspot {h.get('locId', '?')}"
@@ -1263,7 +1422,74 @@ def _format_hotspots(
 
         blocks.append("\n".join(lines))
 
-    return "\n\n".join(blocks)
+    return _join_with_size_cap(blocks, sep="\n\n")
+
+
+def _format_hotspots_compact(
+    hotspots: List[Dict[str, Any]],
+    *,
+    query_lat: Optional[float],
+    query_lng: Optional[float],
+) -> str:
+    """Pipe-delimited table for large hotspot sets (a whole state can return
+    thousands). Same size rationale as _format_observations_compact."""
+    has_distance = query_lat is not None and query_lng is not None
+
+    columns = ["Hotspot (locId)", "Lat,Lng", "Species all-time"]
+    if has_distance:
+        columns.append("Km")
+    columns.append("Last obs")
+
+    rows: List[str] = []
+    for h in hotspots:
+        name = h.get("locName") or f"Hotspot {h.get('locId', '?')}"
+        coords = (
+            f"{h['lat']},{h['lng']}"
+            if h.get("lat") is not None and h.get("lng") is not None
+            else "?"
+        )
+        species = (
+            h.get("numSpeciesAllTime")
+            if h.get("numSpeciesAllTime") is not None
+            else h.get("numSpecies", "unknown")
+        )
+        cells: List[Any] = [f"{name} ({h.get('locId', '?')})", coords, species]
+        if has_distance:
+            km = "?"
+            if h.get("lat") is not None and h.get("lng") is not None:
+                try:
+                    km = "{:.1f}".format(
+                        _haversine_km(
+                            float(query_lat),
+                            float(query_lng),
+                            float(h["lat"]),
+                            float(h["lng"]),
+                        )
+                    )
+                except (TypeError, ValueError):
+                    pass
+            cells.append(km)
+        latest = h.get("latestObsDt")
+        if latest:
+            days = _days_ago(latest)
+            last = _format_date(latest)
+            if days is not None and days > 0:
+                last += f" ({days}d ago)"
+        else:
+            last = "none (inactive)"
+        cells.append(last)
+
+        rows.append(" | ".join(_table_cell(c) for c in cells))
+
+    header = [
+        f"{len(hotspots)} hotspots — compact table, one per line. Species "
+        f"totals are all-time counts and are NOT comparable across hotspots "
+        f"(eBird does not return per-hotspot checklist counts); use the "
+        f"last-observation date to gauge activity.",
+        "",
+        " | ".join(columns),
+    ]
+    return "\n".join(header) + "\n" + _join_with_size_cap(rows, sep="\n")
 
 
 def _format_taxonomy(taxonomy: List[Dict[str, Any]], limit: int = 20) -> str:

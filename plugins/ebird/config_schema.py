@@ -34,8 +34,12 @@ class EBirdPluginConfig(BaseModel):
     default_max_results: int = Field(
         default=100,
         ge=1,
-        le=10000,
-        description="Default maxResults when not provided by the caller",
+        le=1000,
+        description=(
+            "Default maxResults when not provided by the caller. Capped at "
+            "1000 to match the per-call ceiling in the tool schemas — larger "
+            "responses render to multiple megabytes of text."
+        ),
     )
     default_back: int = Field(
         default=14,
