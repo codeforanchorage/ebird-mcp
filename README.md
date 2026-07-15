@@ -48,6 +48,8 @@ The public endpoint is rate-limited (currently 50,000 requests/day, 20 rps susta
 
 - **Single public `POST /mcp` endpoint** — Streamable HTTP JSON-RPC. Paste the URL into Claude and the eBird tools light up automatically.
 - **10 tools** covering recent observations, notable rarities, nearby observations (with species filters), hotspots, nearby hotspots, taxonomy, and species forms — full table below.
+- **Civic-AI response design** — every response carries provenance (the upstream eBird URL, the parameters actually sent, a retrieved-at timestamp) plus epistemic caveats that keep LLMs honest about sparse data: absence-of-evidence framing, single-observer provenance, sampling-size warnings, notable-is-local rarity, taxonomic ambiguity.
+- **Sized for LLM context windows** — `maxResults` caps at 1,000 per call; result sets above 20 records render as a compact table instead of verbose blocks; a 200 KB response ceiling truncates at a record boundary with an explicit notice, never silently.
 - **AWS Lambda + API Gateway REST + WAFv2** — per-IP rate limiting, daily quota, CloudWatch alarms (Lambda errors, throttles, p95 duration, API Gateway 4xx/5xx probing), X-Ray tracing, JSON access logs.
 - **One Terraform apply** — `./scripts/deploy.sh --environment prod` builds the deployment zip, plans, prompts, and applies.
 - **Stateless and horizontally scalable** — `Mcp-Session-Id` is for log correlation only; no per-session storage.
@@ -87,6 +89,7 @@ scripts/
   setup-backend.sh    create S3 + DynamoDB backend (one-time)
   refresh_taxonomy.py fetch the full eBird taxonomy into plugins/ebird/data/taxonomy.json
   test_streamable_http.sh  smoke test: initialize, list, call
+tests/                unit tests (plain unittest, no network): caveat/formatting behavior + input validation
 local_server.py       aiohttp wrapper for local testing on http://localhost:8000/mcp
 stdio_bridge.py       stdio<->HTTP bridge for stdio-only MCP clients
 config.yaml           local config (gitignored; copy from config-example.yaml)
@@ -116,11 +119,14 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 3. Run locally
+# 3. Run the unit tests (no network — upstream calls are stubbed)
+python -m unittest discover tests
+
+# 4. Run locally
 python local_server.py
 # Listening on http://localhost:8000/mcp
 
-# 4. Smoke test (in another shell, requires jq)
+# 5. Smoke test (in another shell, requires jq)
 bash ./scripts/test_streamable_http.sh
 ```
 
@@ -194,6 +200,8 @@ logging:
 - **Stateless.** `Mcp-Session-Id` is for log correlation; the server stores no per-session state. Horizontally scalable.
 - **CORS / Origin validation.** The Lambda's `UniversalHTTPHandler` allowlist accepts `https://claude.ai`, `https://claude.com`, `https://console.anthropic.com`, and the MCP Inspector on `localhost:6274`. Browser requests from any other Origin get 403; non-browser clients (including claude.ai's backend connector, which sends no Origin header) are unaffected. Edit `server/http_handler.py::ALLOWED_ORIGINS` to add more.
 - **Rate limits.** Defaults in `prod.tfvars`: WAF 50 req/IP per 5 min (sized against the upstream eBird 1000-calls/day quota, not AWS capacity), API GW 20 rps sustained / 40 burst / 50,000 per day. Tune for your traffic.
+- **Input validation, in two layers.** `regionCode`/`speciesCode`/`locale` flow into upstream URL paths, so the plugin regex-validates them before any URL is constructed (`plugins/ebird/plugin.py::_clamp_and_validate`, pinned by `tests/test_input_validation.py`). On prod, the WAF's managed rule sets (`CommonRuleSet`, `KnownBadInputs`) independently 403 traversal-shaped payloads at the edge before they reach the Lambda. Numeric args (`back`, `dist`, `maxResults`) are clamped into valid ranges, and the **effective** values are echoed in the response's `Query:` line so callers always see what actually ran.
+- **Response-size controls.** `maxResults` caps at 1,000 per call (eBird itself accepts 10,000, but that renders to 3+ MB of text no client can use). Result sets above 20 records switch from the readable per-record block format to a compact pipe-delimited table, and a 200 KB body ceiling truncates at a record boundary with an explicit `RESPONSE SIZE CEILING` notice.
 - **Bundled taxonomy.** The deploy script bakes the full eBird taxonomy into the Lambda package; `get_taxonomy` calls with `locale=en` / `fmt=json` are served from the bundle instead of the live API. This is the single biggest saver against the 1000-calls/day eBird quota. Non-English locales and CSV fall through to the live API.
 - **Cold-start cleanup.** The Lambda adapter shuts down the plugin manager after every invocation to avoid `"Event loop is closed"` errors with httpx. This means each invocation re-initializes the eBird client. At Lambda concurrency this is fine; if cold-starts become a problem, keep the client at module scope and remove the shutdown in `_run_with_cleanup`.
 - **MCP protocol versions.** Negotiated per the spec — `2024-11-05` through `2025-11-25` are supported (`core/mcp_server.py::SUPPORTED_PROTOCOL_VERSIONS`); append newer revisions to that tuple as they ship, after checking their transport requirements against `server/http_handler.py`.

@@ -233,6 +233,8 @@ Every response includes the upstream eBird URL it came from, the parameters sent
 
 The server also adds civic-AI safety caveats: it flags single-observer claims, absence-of-evidence patterns (eBird is opt-in, "no records" usually means "no birders looked"), region-deduped result misuse, notable-is-local rarity, and taxonomic ambiguity for hybrids and subspecies. These exist because LLMs answering questions about wildlife data are prone to over-confident pattern claims from sparse data.
 
+Responses are also sized for LLM context windows: `maxResults` is capped at 1,000 records per call, result sets above 20 records come back as a compact table rather than verbose per-record blocks, and a 200 KB response ceiling truncates at a record boundary with an explicit notice — so one over-broad query can't flood your model's context. If a response says it was truncated, narrow the query (smaller `back`, `dist`, or `maxResults`) and re-run.
+
 ---
 
 ## Going deeper
@@ -290,7 +292,7 @@ eBird is just the first plugin. The framework underneath is a general-purpose ho
 2. In `config.yaml`, set `enabled: true` on your plugin (and only yours — one fork = one MCP server, enforced at load time).
 3. Deploy. The framework discovers the plugin, namespaces its tools, and serves it — no other code changes.
 
-The eBird plugin (`plugins/ebird/`) is the worked example: study its input validation (regex-checked path parameters, clamped numeric ranges), response provenance, and LLM-facing caveats before writing your own.
+The eBird plugin (`plugins/ebird/`) is the worked example: study its input validation (regex-checked path parameters, clamped numeric ranges), response provenance, response-size controls, and LLM-facing caveats before writing your own — the behavior is pinned by the unit tests in `tests/`, which run with no network and make a good template for testing your plugin.
 
 This architecture is itself a fork lineage: it comes from the City of Boston's [OpenContext](https://github.com/CityOfBoston/OpenContext) via [anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) — cities and civic-tech brigades adapting the same scaffold to their own data. Yours can be next.
 
