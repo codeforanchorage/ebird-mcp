@@ -32,10 +32,20 @@ resource "aws_iam_role_policy_attachment" "api_gateway_cloudwatch" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
 }
 
-resource "aws_api_gateway_account" "this" {
-  cloudwatch_role_arn = aws_iam_role.api_gateway_cloudwatch.arn
-}
-
+# aws_api_gateway_account is intentionally NOT declared here.
+#
+# It is an ACCOUNT+REGION-LEVEL SINGLETON -- AWS stores exactly one CloudWatch
+# role ARN for all of API Gateway in the region. It is now owned solely by the
+# mcp-stats repo (terraform/aws/apigw_account.tf), which points it at the
+# fleet-owned mcp-fleet-apigw-cloudwatch role.
+#
+# Declaring it per-MCP meant the whole fleet's API Gateway access logging hung
+# off ONE MCP's IAM role, so deleting that role would have broken logging for
+# every MCP -- including the log groups the mcp-stats dashboard reads.
+#
+# The aws_iam_role.api_gateway_cloudwatch above is no longer referenced by this
+# stack. It is left in place deliberately: removing it would destroy an IAM role
+# as a side effect of this refactor, and keeping it makes reverting trivial.
 resource "aws_cloudwatch_log_group" "api_gateway_access" {
   name              = "/aws/apigateway/${local.lambda_name}-access"
   retention_in_days = 30
