@@ -136,27 +136,36 @@ _MAX_RESULTS_CEILING = 1000            # schema maximum + clamp ceiling for maxR
 _COMPACT_FORMAT_THRESHOLD = 20         # above this many records → compact table
 _MAX_BODY_BYTES = 200 * 1024           # formatted-body byte ceiling (truncates at a record boundary)
 
-# Row ceiling for the taxonomy tool's STRUCTURED output, and the one place
-# in this server where the machine-readable channel is deliberately not
+# Row ceiling for STRUCTURED output on the two tools whose result set is
+# unbounded by any caller argument: get_taxonomy and get_hotspots. This is
+# the one place where the machine-readable channel is deliberately not
 # complete. The rule elsewhere is that structuredContent ships everything
 # the text clipped — truncating the machine half defeats its purpose — but
-# taxonomy cannot honour it. Measured against the bundled snapshot:
+# these two cannot honour it, because Lambda's synchronous response payload
+# limit is a hard 6 MB and neither tool has a maxResults to bound it.
 #
-#     cat=species   11,167 entries   3.60 MB raw / 2.52 MB trimmed
-#     all categories 17,849 entries  6.00 MB raw
+# Measured, not estimated:
 #
-# Lambda's synchronous response payload limit is 6 MB, before the JSON-RPC
-# envelope and the text block. Shipping the full set would turn the most
-# frequently called tool in the workflow (it is step 1 of every lookup)
-# into a multi-megabyte response, and for `cat` values covering the whole
-# taxonomy it would fail outright rather than truncate.
+#   get_taxonomy   cat=species     11,167 rows   3.60 MB raw / 2.52 MB trimmed
+#                  all categories  17,849 rows   6.00 MB raw
+#   get_hotspots   US-NY            9,388 rows   1.90 MB structured (212 B/row)
+#                  US-CA           19,065 rows   4.30 MB structured
+#                  US             (times out before it can serialize at all)
 #
-# So the cap stands at the same 1000 as _MAX_RESULTS_CEILING (~230 KB
-# trimmed), and the response says so loudly: summary.total_count carries
-# the TRUE total — knowable here because the bundle is local — alongside
-# truncated=true and a ROWS_TRUNCATED caveat. Incomplete and honest about
-# it beats either silently short or not returning at all.
-_MAX_STRUCTURED_TAXONOMY_ROWS = 1000
+# US-CA is the case that forced this: a single state at 4.30 MB is 72% of
+# the hard limit, and eBird adds hotspots continuously. Uncapped, the
+# failure mode when it finally crosses is not a truncated answer but an
+# opaque Lambda error.
+#
+# 5000 rows keeps both tools near ~1.1 MB at their measured row sizes, with
+# room for the long location names that push some rows well past average.
+# The response says so loudly: summary.total_count carries the TRUE total,
+# alongside truncated=true and a ROWS_TRUNCATED caveat naming the figure.
+# Incomplete and explicit beats either silently short or failing outright.
+#
+# Observation tools do not need this — maxResults already caps them at
+# _MAX_RESULTS_CEILING (1000), well under this ceiling.
+_MAX_STRUCTURED_ROWS = 5000
 
 # Marker the size backstop stamps into the TEXT body. Shared so the caveat
 # builder can detect the clip without re-deriving byte sizes, and so the
@@ -1119,19 +1128,40 @@ def _build_caveats(
                 )
             )
 
+        # The two tools whose result set no caller argument bounds. Both
+        # cap structuredContent at _MAX_STRUCTURED_ROWS, and both say so.
+        if (
+            tool_name in _HOTSPOT_TOOLS
+            and isinstance(data, list)
+            and len(data) > _MAX_STRUCTURED_ROWS
+        ):
+            caveats.append(
+                _caveat(
+                    CAVEAT_ROWS_TRUNCATED,
+                    f"⚠️ ROWS TRUNCATED: {len(data):,} hotspots match this "
+                    f"region but only the first {_MAX_STRUCTURED_ROWS:,} "
+                    f"are in structuredContent — the full set would exceed "
+                    f"this server's response limit. summary.total_count is "
+                    f"the real figure; the rows are a prefix of it, in "
+                    f"eBird's own order, NOT the most active ones. Query a "
+                    f"smaller region (subnational2 / county codes) or use "
+                    f"get_nearby_hotspots around a point of interest.",
+                )
+            )
+
         if tool_name == "get_taxonomy" and isinstance(data, list):
             total = len(data)
-            if total > _MAX_STRUCTURED_TAXONOMY_ROWS:
+            if total > _MAX_STRUCTURED_ROWS:
                 caveats.append(
                     _caveat(
                         CAVEAT_ROWS_TRUNCATED,
                         f"⚠️ ROWS TRUNCATED: {total:,} taxonomy entries match "
                         f"this query but only the first "
-                        f"{_MAX_STRUCTURED_TAXONOMY_ROWS:,} are in "
+                        f"{_MAX_STRUCTURED_ROWS:,} are in "
                         f"structuredContent — the full set is several "
                         f"megabytes and would exceed the response limit. "
-                        f"This is the one place where the machine-readable "
-                        f"rows are incomplete. Narrow with `cat`, or do not "
+                        f"summary.total_count is the real figure. "
+                        f"Narrow with `cat`, or do not "
                         f"treat this list as the whole taxonomy.",
                     )
                 )
@@ -1141,7 +1171,7 @@ def _build_caveats(
             # an aggregate.
             non_species = {
                 e.get("category")
-                for e in data[:_MAX_STRUCTURED_TAXONOMY_ROWS]
+                for e in data[:_MAX_STRUCTURED_ROWS]
                 if e.get("category") and e.get("category") != "species"
             }
             if non_species:
@@ -1551,9 +1581,9 @@ def _build_structured(
 
     if tool_name == "get_taxonomy":
         # The one deliberately-capped structured channel; see
-        # _MAX_STRUCTURED_TAXONOMY_ROWS for the measurements behind it.
+        # _MAX_STRUCTURED_ROWS for the measurements behind it.
         total = len(data)
-        shown = data[:_MAX_STRUCTURED_TAXONOMY_ROWS]
+        shown = data[:_MAX_STRUCTURED_ROWS]
         rows = _taxonomy_rows(shown)
         categories: Dict[str, int] = {}
         for row in rows:
@@ -1589,20 +1619,24 @@ def _build_structured(
     # Hotspots. get_hotspots/get_nearby_hotspots take no maxResults, so the
     # returned set is always complete and total_count is never null.
     nearby = tool_name == "get_nearby_hotspots"
+    total = len(data)
     rows = _hotspot_rows(
-        data,
+        data[:_MAX_STRUCTURED_ROWS],
         query_lat=arguments.get("lat") if nearby else None,
         query_lng=arguments.get("lng") if nearby else None,
     )
     envelope["rows"] = rows
     envelope["summary"] = {
         "returned": len(rows),
-        "total_count": len(rows),
-        "truncated": False,
+        # eBird returned the whole set, so the total is known exactly even
+        # when we decline to ship all of it. Truncating rows must not turn
+        # a known count into a guess.
+        "total_count": total,
+        "truncated": total > len(rows),
         "retrieved_at": retrieved_at,
-        "active_hotspots": sum(
-            1 for r in rows if r.get("latestObsDt")
-        ),
+        # Counted over the rows actually shipped, so it agrees with what
+        # the caller can see rather than describing rows it never got.
+        "active_hotspots": sum(1 for r in rows if r.get("latestObsDt")),
     }
     return envelope
 

@@ -447,6 +447,102 @@ class HotspotStructureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.structured_content["summary"]["total_count"], 1)
 
 
+class HotspotRowCapTests(unittest.IsolatedAsyncioTestCase):
+    """get_hotspots takes no maxResults, so its result set is unbounded.
+
+    Measured against staging before this cap existed: US-NY returned 9,388
+    hotspots (1.90 MB of structuredContent) and US-CA returned 19,065
+    (4.30 MB) -- 72% of Lambda's hard 6 MB response payload limit, for a
+    single US state, on a tool whose row count only grows. Uncapped, the
+    failure mode when it finally crossed would not be a truncated answer
+    but an opaque Lambda error.
+    """
+
+    def _many(self, n: int) -> List[Dict[str, Any]]:
+        return [_hotspot(locId=f"L{i}") for i in range(n)]
+
+    async def test_rows_are_capped(self):
+        result = await _run(
+            "get_hotspots", self._many(9000), {"regionCode": "US-NY"}
+        )
+        _validate(HOTSPOTS_SCHEMA, result.structured_content)
+        self.assertEqual(
+            len(result.structured_content["rows"]),
+            plugin_module._MAX_STRUCTURED_ROWS,
+        )
+
+    async def test_true_total_survives_truncation(self):
+        result = await _run(
+            "get_hotspots", self._many(9000), {"regionCode": "US-NY"}
+        )
+        summary = result.structured_content["summary"]
+        self.assertEqual(
+            summary["total_count"],
+            9000,
+            "eBird returned the whole set, so the count is known exactly "
+            "even though we decline to ship all of it.",
+        )
+        self.assertIs(summary["truncated"], True)
+
+    async def test_truncation_raises_a_coded_caveat(self):
+        result = await _run(
+            "get_hotspots", self._many(9000), {"regionCode": "US-NY"}
+        )
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertIn(CAVEAT_ROWS_TRUNCATED, codes)
+
+    async def test_caveat_warns_the_prefix_is_not_the_best_ones(self):
+        """Rows are eBird's order, not ranked by activity."""
+        result = await _run(
+            "get_hotspots", self._many(9000), {"regionCode": "US-NY"}
+        )
+        caveat = next(
+            c for c in result.structured_content["caveats"]
+            if c["code"] == CAVEAT_ROWS_TRUNCATED
+        )
+        self.assertIn("NOT the most active", caveat["message"])
+
+    async def test_under_the_cap_is_untouched(self):
+        result = await _run(
+            "get_hotspots", self._many(100), {"regionCode": "US-AK"}
+        )
+        summary = result.structured_content["summary"]
+        self.assertEqual(summary["returned"], 100)
+        self.assertEqual(summary["total_count"], 100)
+        self.assertIs(summary["truncated"], False)
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertNotIn(CAVEAT_ROWS_TRUNCATED, codes)
+
+    async def test_active_count_describes_only_the_shipped_rows(self):
+        """A summary must not describe rows the caller never received."""
+        rows = self._many(9000)
+        for row in rows[plugin_module._MAX_STRUCTURED_ROWS:]:
+            row["latestObsDt"] = "2026-05-12 09:15"
+        for row in rows[: plugin_module._MAX_STRUCTURED_ROWS]:
+            row["latestObsDt"] = None
+        result = await _run("get_hotspots", rows, {"regionCode": "US-NY"})
+        self.assertEqual(
+            result.structured_content["summary"]["active_hotspots"],
+            0,
+            "active_hotspots counted rows that were not shipped",
+        )
+
+    async def test_capped_payload_stays_well_under_the_lambda_limit(self):
+        """The measurement that justifies the cap value."""
+        import json as _json
+
+        result = await _run(
+            "get_hotspots", self._many(20000), {"regionCode": "US-CA"}
+        )
+        size_mb = len(_json.dumps(result.structured_content)) / 1024 / 1024
+        self.assertLess(
+            size_mb,
+            2.0,
+            f"capped hotspot payload is {size_mb:.2f} MB; uncapped, the "
+            "same query measured 4.30 MB against a hard 6 MB limit",
+        )
+
+
 class CaveatChannelParityTests(unittest.IsolatedAsyncioTestCase):
     """The two channels come from one list and must not drift."""
 
@@ -615,30 +711,30 @@ class TaxonomyTruncationTests(unittest.IsolatedAsyncioTestCase):
         return [_taxon(speciesCode=f"sp{i:05d}") for i in range(n)]
 
     async def test_rows_are_capped(self):
-        result = await _run("get_taxonomy", self._many(2500))
+        result = await _run("get_taxonomy", self._many(6500))
         _validate(TAXONOMY_SCHEMA, result.structured_content)
         self.assertEqual(
             len(result.structured_content["rows"]),
-            plugin_module._MAX_STRUCTURED_TAXONOMY_ROWS,
+            plugin_module._MAX_STRUCTURED_ROWS,
         )
 
     async def test_truncation_reports_the_true_total_not_the_capped_one(self):
-        result = await _run("get_taxonomy", self._many(2500))
+        result = await _run("get_taxonomy", self._many(6500))
         summary = result.structured_content["summary"]
         self.assertEqual(
             summary["total_count"],
-            2500,
+            6500,
             "The bundle is local, so the real total is knowable. "
             "Truncating rows must not make the count a lie.",
         )
         self.assertIs(summary["truncated"], True)
         self.assertEqual(
             summary["returned"],
-            plugin_module._MAX_STRUCTURED_TAXONOMY_ROWS,
+            plugin_module._MAX_STRUCTURED_ROWS,
         )
 
     async def test_truncation_raises_a_coded_caveat(self):
-        result = await _run("get_taxonomy", self._many(2500))
+        result = await _run("get_taxonomy", self._many(6500))
         codes = {c["code"] for c in result.structured_content["caveats"]}
         self.assertIn(
             CAVEAT_ROWS_TRUNCATED,
@@ -678,9 +774,10 @@ class TaxonomyTruncationTests(unittest.IsolatedAsyncioTestCase):
         size_mb = len(json.dumps(payload)) / 1024 / 1024
         self.assertLess(
             size_mb,
-            1.0,
+            2.0,
             f"structured taxonomy payload is {size_mb:.2f} MB; the cap "
-            "exists to keep this well under Lambda's 6 MB response limit",
+            "exists to keep this well under Lambda's hard 6 MB response "
+            "limit, with room for the JSON-RPC envelope and the text block",
         )
 
 
