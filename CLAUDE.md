@@ -14,7 +14,7 @@ copy config-example.yaml config.yaml          # then edit api_key
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python local_server.py                        # http://localhost:8000/mcp
+python scripts/local_server.py                # http://localhost:8000/mcp
 
 # Smoke test the running server (requires jq + Git Bash on Windows)
 bash ./scripts/test_streamable_http.sh        # defaults to localhost:8000
@@ -38,7 +38,7 @@ Request flow:
 Client -> POST /mcp (JSON-RPC 2.0)
   -> [AWS only] WAFv2 + API Gateway REST + usage plan
   -> server.adapters.aws_lambda.lambda_handler           (Lambda)
-     or local_server.py aiohttp app                       (local)
+     or scripts/local_server.py aiohttp app               (local)
      -> server.http_handler.UniversalHTTPHandler         (cloud-agnostic)
         -> core.mcp_server.MCPServer                     (JSON-RPC dispatcher)
            -> core.plugin_manager.PluginManager
@@ -85,7 +85,7 @@ Key design points future Claude should know before editing:
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
-- `local_server.py` — aiohttp wrapper that exposes `UniversalHTTPHandler` on localhost.
+- `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs; `tests/test_transport_parity.py` pins that.
 - `stdio_bridge.py` — thin stdio<->HTTP shim for stdio-only MCP clients (forwards to a running HTTP server).
 
 ## Files NOT under version control (rebuilt or local-only)

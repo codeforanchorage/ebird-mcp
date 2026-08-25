@@ -280,7 +280,7 @@ You'll need:
 The deploy script handles everything else: it validates your config, bundles the full eBird taxonomy into the package (so common taxonomy lookups never touch your eBird quota), builds the Lambda zip, and runs `terraform apply`. Full architecture and operational notes are in the [repo README](https://github.com/codeforanchorage/ebird-mcp) and `CLAUDE.md`.
 
 !!! tip "Test locally before deploying"
-    You don't need AWS to try the code: `pip install -r requirements.txt`, then `python local_server.py` serves the identical MCP endpoint on `http://localhost:8000/mcp`. Point the MCP Inspector or any local client at it.
+    You don't need AWS to try the code: `pip install -r requirements.txt`, then `python scripts/local_server.py` serves the identical MCP endpoint on `http://localhost:8000/mcp`. Point the MCP Inspector or any local client at it.
 
 ---
 

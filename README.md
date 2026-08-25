@@ -90,7 +90,7 @@ scripts/
   refresh_taxonomy.py fetch the full eBird taxonomy into plugins/ebird/data/taxonomy.json
   test_streamable_http.sh  smoke test: initialize, list, call
 tests/                unit tests (plain unittest, no network): caveat/formatting behavior + input validation
-local_server.py       aiohttp wrapper for local testing on http://localhost:8000/mcp
+scripts/local_server.py  aiohttp adapter onto UniversalHTTPHandler for local testing
 stdio_bridge.py       stdio<->HTTP bridge for stdio-only MCP clients
 config.yaml           local config (gitignored; copy from config-example.yaml)
 config-example.yaml   template
@@ -123,7 +123,7 @@ pip install -r requirements.txt
 python -m unittest discover tests
 
 # 4. Run locally
-python local_server.py
+python scripts/local_server.py
 # Listening on http://localhost:8000/mcp
 
 # 5. Smoke test (in another shell, requires jq)
