@@ -62,7 +62,21 @@ class MCPServer:
     # Protocol revisions this server can speak. The server is stateless per
     # request, so every revision is served identically; negotiation just
     # echoes the client's requested version when we support it. Extend this
-    # tuple (newest last) when a new spec revision ships.
+    # tuple (newest last) when a new spec revision ships — but check the new
+    # revision's transport MUSTs against server/http_handler.py first.
+    #
+    # 2026-07-28 is deliberately NOT listed. It is not a version-string
+    # addition like the four below: it replaces the initialize handshake
+    # with per-request `_meta` plus a mandatory `server/discover` RPC. That
+    # is a dual-era migration needing real work here, not a tuple entry, and
+    # claiming support without implementing it would strand clients that
+    # take us at our word.
+    #
+    # Related, in server/http_handler.py: an unrecognized
+    # MCP-Protocol-Version returns 400 with -32600 rather than the
+    # 2026-07-28 UnsupportedProtocolVersionError (-32022). That is
+    # deliberate too — a dual-era client then reads us as a legacy server
+    # and falls back to initialize instead of retrying.
     SUPPORTED_PROTOCOL_VERSIONS = (
         "2024-11-05",
         "2025-03-26",
