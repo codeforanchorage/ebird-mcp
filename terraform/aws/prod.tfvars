@@ -4,8 +4,12 @@ aws_region      = "us-west-2"
 config_file     = "config.yaml"
 
 # Lambda settings — overridden by config.yaml:aws.* if set there.
-lambda_memory   = 512
-lambda_timeout  = 30
+lambda_memory = 512
+# Kept in sync with config.yaml, which WINS for this variable (main.tf reads
+# `local.config.aws.lambda_timeout` first and only falls back to this var).
+# 28s sits just under API Gateway's hard, non-adjustable 29s integration
+# timeout so the Lambda self-terminates before the gateway gives up.
+lambda_timeout = 28
 
 # Viral-ready capacity, with a hard cost ceiling.
 #

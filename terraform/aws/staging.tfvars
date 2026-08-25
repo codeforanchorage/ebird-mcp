@@ -3,8 +3,11 @@ stage_name      = "staging"
 aws_region      = "us-west-2"
 config_file     = "config.yaml"
 
-lambda_memory   = 512
-lambda_timeout  = 30
+lambda_memory = 512
+# Kept in sync with config.yaml, which WINS for this variable (main.tf reads
+# `local.config.aws.lambda_timeout` first). 28s sits just under API Gateway's
+# hard, non-adjustable 29s integration timeout.
+lambda_timeout = 28
 lambda_reserved_concurrency = 5
 
 api_quota_limit = 500
