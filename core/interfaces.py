@@ -20,6 +20,30 @@ class PluginType(str, Enum):
     ANALYTICS = "analytics"
 
 
+class ToolInputError(ValueError):
+    """Raised when a tool rejects the caller's arguments.
+
+    A marker, not a behaviour change: it exists so the plugin's handler can
+    tell "the caller asked for something invalid" from "this server broke",
+    and log the first at WARNING with no traceback. A traceback is a claim
+    that the server failed; spending one on "you forgot speciesCode" is
+    what makes real faults hard to find in CloudWatch.
+
+    Deliberately NOT inferred from ValueError alone. That heuristic is
+    wrong here in two ways:
+      * json.JSONDecodeError subclasses ValueError, so a malformed
+        upstream payload would be misfiled as a caller mistake and lose
+        its stack trace.
+      * ``_parse_hotspot_text`` coerces eBird's CSV fallback with bare
+        float(), which raises ValueError on a malformed upstream row — a
+        genuine upstream fault whose traceback we want.
+    Both stay plain ValueError and keep their tracebacks.
+
+    Subclasses ValueError so every existing ``except ValueError`` keeps
+    working, which makes converting a raise site mechanical and safe.
+    """
+
+
 class InvalidToolParamsError(ValueError):
     """Raised when a tools/call request is itself malformed.
 

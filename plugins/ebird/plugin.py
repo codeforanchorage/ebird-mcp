@@ -33,7 +33,13 @@ from tenacity import (
     wait_exponential,
 )
 
-from core.interfaces import MCPPlugin, PluginType, ToolDefinition, ToolResult
+from core.interfaces import (
+    MCPPlugin,
+    PluginType,
+    ToolDefinition,
+    ToolInputError,
+    ToolResult,
+)
 from plugins.ebird.config_schema import EBirdPluginConfig
 from plugins.ebird.ebird_client import EBirdClient, QuotaExhausted
 
@@ -477,7 +483,13 @@ class EBirdPlugin(MCPPlugin):
 
         try:
             arguments = _clamp_and_validate(arguments)
-        except ValueError as e:
+        except ToolInputError as e:
+            # The caller sent something invalid. WARNING with no traceback:
+            # a stack trace here would read as a server fault and bury the
+            # real ones. A plain ValueError escaping this call is NOT a
+            # caller error and deliberately propagates to the generic
+            # handler with its trace intact.
+            logger.warning("Rejected %s arguments: %s", tool_name, e)
             return ToolResult(content=[], success=False, error_message=str(e))
 
         detail = arguments.get("detail", "simple")
@@ -501,12 +513,13 @@ class EBirdPlugin(MCPPlugin):
             msg = f"eBird API HTTP {e.response.status_code}: {body_excerpt}"
             logger.warning(msg)
             return ToolResult(content=[], success=False, error_message=msg)
-        except KeyError as e:
-            return ToolResult(
-                content=[],
-                success=False,
-                error_message=f"Missing required argument: {e.args[0]}",
-            )
+        except ToolInputError as e:
+            # A required argument was missing. Same reasoning as above: the
+            # caller can fix this, so it is a WARNING, not a fault. (This
+            # replaces an `except KeyError` branch — a KeyError escaping
+            # _dispatch now means a genuine bug and keeps its traceback.)
+            logger.warning("Rejected %s arguments: %s", tool_name, e)
+            return ToolResult(content=[], success=False, error_message=str(e))
         except Exception as e:
             logger.exception(f"Error in {tool_name}")
             return ToolResult(content=[], success=False, error_message=str(e))
@@ -638,8 +651,14 @@ class _UnknownTool(Exception):
 
 
 def _require(args: Dict[str, Any], key: str) -> Any:
+    """Fetch a required argument or reject the call.
+
+    Raises ToolInputError rather than KeyError so a missing argument is
+    classified as the caller mistake it is. A genuine KeyError escaping
+    _dispatch now means a real bug and keeps its ERROR + traceback.
+    """
     if key not in args or args[key] in (None, ""):
-        raise KeyError(key)
+        raise ToolInputError(f"Missing required argument: {key}")
     return args[key]
 
 
@@ -656,7 +675,7 @@ def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     if "regionCode" in out and out["regionCode"] is not None:
         v = out["regionCode"]
         if not isinstance(v, str) or not _REGION_RE.match(v):
-            raise ValueError(
+            raise ToolInputError(
                 f"Invalid regionCode: {v!r}. Expected e.g. 'US', 'US-NY', "
                 f"'US-NY-109', or a hotspot location ID like 'L12345'."
             )
@@ -664,7 +683,7 @@ def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     if "speciesCode" in out and out["speciesCode"] is not None:
         v = out["speciesCode"]
         if not isinstance(v, str) or not _SPECIES_RE.match(v):
-            raise ValueError(
+            raise ToolInputError(
                 f"Invalid speciesCode: {v!r}. Expected lowercase alphanumeric, "
                 f"e.g. 'amecro' for American Crow. Note: these are 6-letter "
                 f"eBird internal codes, NOT 4-letter banding alpha codes."
@@ -673,19 +692,19 @@ def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     if "cat" in out and out["cat"] is not None:
         v = out["cat"]
         if v not in _TAXONOMY_CAT:
-            raise ValueError(
+            raise ToolInputError(
                 f"Invalid cat: {v!r}. Allowed: {sorted(_TAXONOMY_CAT)}."
             )
 
     if "fmt" in out and out["fmt"] is not None:
         v = out["fmt"]
         if v not in _TAXONOMY_FMT:
-            raise ValueError(f"Invalid fmt: {v!r}. Allowed: {sorted(_TAXONOMY_FMT)}.")
+            raise ToolInputError(f"Invalid fmt: {v!r}. Allowed: {sorted(_TAXONOMY_FMT)}.")
 
     if "locale" in out and out["locale"] is not None:
         v = out["locale"]
         if not isinstance(v, str) or not _LOCALE_RE.match(v):
-            raise ValueError(
+            raise ToolInputError(
                 f"Invalid locale: {v!r}. Expected ISO codes like 'en', 'es', 'pt_BR'."
             )
 
@@ -701,30 +720,41 @@ def _clamp_and_validate(args: Dict[str, Any]) -> Dict[str, Any]:
     if out.get("lat") is not None:
         lat = _coerce_float(out["lat"], "lat")
         if not (-90 <= lat <= 90):
-            raise ValueError(f"Invalid lat: {lat}. Must be between -90 and 90.")
+            raise ToolInputError(f"Invalid lat: {lat}. Must be between -90 and 90.")
         out["lat"] = lat
     if out.get("lng") is not None:
         lng = _coerce_float(out["lng"], "lng")
         if not (-180 <= lng <= 180):
-            raise ValueError(f"Invalid lng: {lng}. Must be between -180 and 180.")
+            raise ToolInputError(f"Invalid lng: {lng}. Must be between -180 and 180.")
         out["lng"] = lng
 
     return out
 
 
 def _clamp_int(value: Any, lo: int, hi: int, name: str) -> int:
+    """Coerce a caller-supplied integer argument, then clamp it.
+
+    The ONLY sanctioned int() over a caller argument. A bare int() at a
+    call site would surface Python's own "invalid literal for int() with
+    base 10: 'abc'" — useless to the caller and, worse, indistinguishable
+    from a server fault in the logs. Raising ToolInputError names the
+    argument and the offending value instead.
+    ``tests/test_caller_error_logging.py`` sweeps the AST to keep it that
+    way.
+    """
     try:
         i = int(value)
     except (TypeError, ValueError):
-        raise ValueError(f"Invalid {name}: {value!r}. Expected integer.")
+        raise ToolInputError(f"Invalid {name}: {value!r}. Expected integer.")
     return max(lo, min(hi, i))
 
 
 def _coerce_float(value: Any, name: str) -> float:
+    """Coerce a caller-supplied float argument. See _clamp_int."""
     try:
         return float(value)
     except (TypeError, ValueError):
-        raise ValueError(f"Invalid {name}: {value!r}. Expected number.")
+        raise ToolInputError(f"Invalid {name}: {value!r}. Expected number.")
 
 
 def _ok(text: str) -> ToolResult:
