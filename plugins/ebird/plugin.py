@@ -42,6 +42,23 @@ from core.interfaces import (
 )
 from plugins.ebird.config_schema import EBirdPluginConfig
 from plugins.ebird.ebird_client import EBirdClient, QuotaExhausted
+from plugins.ebird.schemas import (
+    CAVEAT_ABSENCE_OF_EVIDENCE,
+    CAVEAT_COUNT_NOT_REPORTED,
+    CAVEAT_LOW_SURVEY_EFFORT,
+    CAVEAT_NOTABLE_IS_LOCAL,
+    CAVEAT_ONE_RECORD_PER_SPECIES,
+    CAVEAT_POSSIBLY_TRUNCATED,
+    CAVEAT_RESPONSE_SIZE_CEILING,
+    CAVEAT_SINGLE_OBSERVER,
+    CAVEAT_SINGLE_RECORD,
+    CAVEAT_SMALL_SAMPLE,
+    CAVEAT_TAXONOMIC_AMBIGUITY,
+    CAVEAT_UNCOMPARABLE_SPECIES_TOTALS,
+    CAVEAT_WINDOW_STALENESS,
+    HOTSPOTS_SCHEMA,
+    OBSERVATIONS_SCHEMA,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +110,11 @@ _SPECIES_SPECIFIC_TOOLS = frozenset({
     "get_nearby_observations_for_species",
 })
 
+_HOTSPOT_TOOLS = frozenset({
+    "get_hotspots",
+    "get_nearby_hotspots",
+})
+
 
 # Sampling-caveat thresholds. Tuned conservatively — a false alarm on
 # heavily-birded areas (Central Park, Cape May) trains users to ignore the
@@ -109,6 +131,12 @@ _STALE_WINDOW_MIN_DAYS = 3             # below this, freshness noise dominates
 _MAX_RESULTS_CEILING = 1000            # schema maximum + clamp ceiling for maxResults
 _COMPACT_FORMAT_THRESHOLD = 20         # above this many records → compact table
 _MAX_BODY_BYTES = 200 * 1024           # formatted-body byte ceiling (truncates at a record boundary)
+
+# Marker the size backstop stamps into the TEXT body. Shared so the caveat
+# builder can detect the clip without re-deriving byte sizes, and so the
+# wording can change without breaking that detection. Only the text is ever
+# clipped; structuredContent always carries the complete row set.
+_SIZE_CEILING_MARKER = "⚠️ RESPONSE SIZE CEILING:"
 
 
 # Human-readable display names. tools/list otherwise carries only the
@@ -132,6 +160,22 @@ TOOL_TITLES = {
     "get_nearby_hotspots": "Nearby Hotspots",
     "get_taxonomy": "Taxonomy Lookup",
     "get_taxonomy_forms": "Taxonomy Forms",
+}
+
+
+# Tools that declare an outputSchema, and therefore MUST populate
+# structuredContent on every path they can return through — including
+# zero-result ones. Membership here is what `_build_structured` dispatches
+# on, so a tool cannot advertise a schema it has no builder for.
+TOOL_OUTPUT_SCHEMAS = {
+    "get_recent_observations": OBSERVATIONS_SCHEMA,
+    "get_recent_observations_for_species": OBSERVATIONS_SCHEMA,
+    "get_notable_observations": OBSERVATIONS_SCHEMA,
+    "get_nearby_observations": OBSERVATIONS_SCHEMA,
+    "get_nearby_notable_observations": OBSERVATIONS_SCHEMA,
+    "get_nearby_observations_for_species": OBSERVATIONS_SCHEMA,
+    "get_hotspots": HOTSPOTS_SCHEMA,
+    "get_nearby_hotspots": HOTSPOTS_SCHEMA,
 }
 
 
@@ -495,11 +539,12 @@ class EBirdPlugin(MCPPlugin):
             ),
         ]
 
-        # Attach display titles. Done here rather than inline on each
-        # ToolDefinition so the map above stays the single legible
-        # inventory of the display surface.
+        # Attach display titles and output schemas. Done here rather than
+        # inline on each ToolDefinition so the maps above stay the single
+        # legible inventory of the display and machine-readable surfaces.
         for tool in tools:
             tool.title = TOOL_TITLES.get(tool.name)
+            tool.output_schema = TOOL_OUTPUT_SCHEMAS.get(tool.name)
         return tools
 
     # ---- Tool execution ---------------------------------------------------
@@ -555,12 +600,31 @@ class EBirdPlugin(MCPPlugin):
             logger.exception(f"Error in {tool_name}")
             return ToolResult(content=[], success=False, error_message=str(e))
 
+        # One timestamp for both channels, so the text footer and
+        # structuredContent cannot report different instants.
+        retrieved_at = _utcnow_iso()
         body = _format_body(tool_name, data, arguments, self.plugin_config)
-        caveats = _build_caveats(tool_name, data, arguments, self.plugin_config)
-        text = _finalize_response(
-            url=url, params=params_sent, body=body, caveats=caveats
+        caveats = _build_caveats(
+            tool_name, data, arguments, self.plugin_config, body=body
         )
-        return _ok(text)
+        text = _finalize_response(
+            url=url,
+            params=params_sent,
+            body=body,
+            caveats=caveats,
+            retrieved_at=retrieved_at,
+        )
+        structured = _build_structured(
+            tool_name,
+            data,
+            arguments,
+            self.plugin_config,
+            url=url,
+            params=params_sent,
+            caveats=caveats,
+            retrieved_at=retrieved_at,
+        )
+        return _ok(text, structured)
 
     async def _dispatch(
         self, tool_name: str, arguments: Dict[str, Any], detail: str
@@ -788,8 +852,12 @@ def _coerce_float(value: Any, name: str) -> float:
         raise ToolInputError(f"Invalid {name}: {value!r}. Expected number.")
 
 
-def _ok(text: str) -> ToolResult:
-    return ToolResult(content=[{"type": "text", "text": text}], success=True)
+def _ok(text: str, structured: Optional[Dict[str, Any]] = None) -> ToolResult:
+    return ToolResult(
+        content=[{"type": "text", "text": text}],
+        structured_content=structured,
+        success=True,
+    )
 
 
 # ---- Provenance + time helpers --------------------------------------------
@@ -820,9 +888,16 @@ def _finalize_response(
     url: str,
     params: Dict[str, Any],
     body: str,
-    caveats: List[str],
+    caveats: List[Dict[str, Any]],
+    retrieved_at: str,
 ) -> str:
-    """Wrap a formatted body with provenance + caveats + retrieved-at footer."""
+    """Wrap a formatted body with provenance + caveats + retrieved-at footer.
+
+    Renders the ``message`` of each caveat except those marked ``_in_body``,
+    whose prose the body already carries — rendering those here would print
+    them twice. ``retrieved_at`` is passed in rather than read from the
+    clock so the text footer and structuredContent report the same instant.
+    """
     parts: List[str] = [f"Source: {url}"]
     if params:
         params_str = ", ".join(f"{k}={_pretty_param(v)}" for k, v in params.items())
@@ -830,12 +905,14 @@ def _finalize_response(
     parts.append("")  # blank line after provenance header
 
     for caveat in caveats:
-        parts.append(caveat)
+        if caveat.get("_in_body"):
+            continue
+        parts.append(caveat["message"])
         parts.append("")
 
     parts.append(body)
     parts.append("")
-    parts.append(f"_Retrieved: {_utcnow_iso()}_")
+    parts.append(f"_Retrieved: {retrieved_at}_")
     return "\n".join(parts)
 
 
@@ -877,6 +954,34 @@ def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 # ---- Caveats --------------------------------------------------------------
 
+
+def _text_was_clipped(body: str) -> bool:
+    """Did the size backstop drop records from the TEXT rendering?
+
+    Only the text is ever clipped — structuredContent always carries the
+    complete row set — so this drives a caveat pointing the reader at the
+    machine-readable half rather than letting them read a partial list as
+    the whole answer.
+    """
+    return _SIZE_CEILING_MARKER in body
+
+
+def _caveat(code: str, message: str, *, in_body: bool = False) -> Dict[str, Any]:
+    """Build one caveat.
+
+    ONE list feeds both channels: ``_finalize_response`` renders ``message``
+    into the text and the structured builder emits {code, message}. They
+    cannot drift because there is no second source.
+
+    ``in_body=True`` marks a caveat whose prose is already woven into the
+    body — the absence-of-evidence framing deliberately lives there rather
+    than in the caveat block, because a model skims a leading warning list
+    but reads the answer. It still travels in structuredContent, so a
+    caller can branch on the code without parsing prose.
+    """
+    return {"code": code, "message": message, "_in_body": in_body}
+
+
 _NOTABLE_IS_LOCAL_CAVEAT = (
     "⚠️ NOTABLE-IS-LOCAL: in eBird, 'notable' means rare *for this specific "
     "location*. A notable bird in one county may be common in the next — do "
@@ -902,18 +1007,29 @@ def _build_caveats(
     data: Any,
     arguments: Dict[str, Any],
     plugin_config: EBirdPluginConfig,
-) -> List[str]:
-    """Compute civic-AI caveats. Best-effort: any unexpected error degrades
-    silently to an empty list so a caveat-formatting bug never breaks an
-    otherwise-good response."""
+    body: str = "",
+) -> List[Dict[str, Any]]:
+    """Compute civic-AI caveats as coded objects.
+
+    ONE list drives both output channels: ``_finalize_response`` renders
+    each ``message`` into the text block, and ``_build_structured`` emits
+    {code, message} into structuredContent. A qualification that used to be
+    prose a model had to notice is now something a caller can branch on,
+    and the two cannot disagree because there is no second source.
+
+    Best-effort: any unexpected error degrades silently to an empty list so
+    a caveat-formatting bug never breaks an otherwise-good response.
+    """
     try:
-        caveats: List[str] = []
+        caveats: List[Dict[str, Any]] = []
 
         # NOTABLE-IS-LOCAL fires on the tool, not the data — even empty notable
         # responses get it, because a model might read "no notable" as "no rare
         # birds in the area" when it really means "no birds notable HERE."
         if tool_name in _NOTABLE_TOOLS:
-            caveats.append(_NOTABLE_IS_LOCAL_CAVEAT)
+            caveats.append(
+                _caveat(CAVEAT_NOTABLE_IS_LOCAL, _NOTABLE_IS_LOCAL_CAVEAT)
+            )
 
         # ONE-RECORD-PER-SPECIES fires on the tool + regionCode shape, not the
         # data: it warns about how the result may be *used*, so it must fire
@@ -922,25 +1038,73 @@ def _build_caveats(
         if tool_name in _REGION_DEDUPED_TOOLS:
             region = arguments.get("regionCode")
             if isinstance(region, str) and not _LOCID_RE.match(region):
-                caveats.append(_REGION_DEDUPED_CAVEAT)
+                caveats.append(
+                    _caveat(
+                        CAVEAT_ONE_RECORD_PER_SPECIES, _REGION_DEDUPED_CAVEAT
+                    )
+                )
 
-        if tool_name == "get_taxonomy_forms" and isinstance(data, list) and len(data) > 1:
+        if (
+            tool_name == "get_taxonomy_forms"
+            and isinstance(data, list)
+            and len(data) > 1
+        ):
             requested = arguments.get("speciesCode", "?")
             caveats.append(
-                f"⚠️ TAXONOMIC AMBIGUITY: {len(data)} taxonomic forms exist for "
-                f"'{requested}' (subspecies / hybrids / spuhs). Observers may "
-                f"report sightings under any of these codes — query each form "
-                f"separately before aggregating, or ask the user which form "
-                f"they meant."
+                _caveat(
+                    CAVEAT_TAXONOMIC_AMBIGUITY,
+                    f"⚠️ TAXONOMIC AMBIGUITY: {len(data)} taxonomic forms "
+                    f"exist for '{requested}' (subspecies / hybrids / "
+                    f"spuhs). Observers may report sightings under any of "
+                    f"these codes — query each form separately before "
+                    f"aggregating, or ask the user which form they meant.",
+                )
+            )
+
+        # Hotspot species totals invite a comparison eBird cannot support.
+        # Fires on the tool, like NOTABLE-IS-LOCAL: the misreading is
+        # available as soon as the numbers are.
+        if tool_name in _HOTSPOT_TOOLS and isinstance(data, list) and data:
+            caveats.append(
+                _caveat(
+                    CAVEAT_UNCOMPARABLE_SPECIES_TOTALS,
+                    "⚠️ UNCOMPARABLE TOTALS: all-time species counts are NOT "
+                    "comparable across hotspots. eBird returns no per-hotspot "
+                    "checklist count, so a site with 200 species over 5000 "
+                    "checklists is indistinguishable here from one with 200 "
+                    "over 50. Rank by days_since_last_obs for activity, not "
+                    "by numSpeciesAllTime for quality.",
+                )
+            )
+
+        if _text_was_clipped(body):
+            caveats.append(
+                _caveat(
+                    CAVEAT_RESPONSE_SIZE_CEILING,
+                    f"⚠️ TEXT CLIPPED: the rendered text hit this server's "
+                    f"{_MAX_BODY_BYTES // 1024} KB backstop and shows only "
+                    f"part of the result. The complete row set is in this "
+                    f"response's structuredContent — read that rather than "
+                    f"concluding the remainder does not exist.",
+                )
             )
 
         if tool_name not in _OBSERVATION_TOOLS or not isinstance(data, list):
             return caveats
 
         count = len(data)
-        # Empty result: the absence-of-evidence message lives in the body, not
-        # the caveats block. No sample-size caveats apply when count is 0.
         if count == 0:
+            # The absence-of-evidence framing is deliberately rendered in the
+            # BODY, not the caveat block: a model skims a leading warning list
+            # but reads the answer. It still travels in structuredContent
+            # under a stable code so a caller can branch without parsing.
+            caveats.append(
+                _caveat(
+                    CAVEAT_ABSENCE_OF_EVIDENCE,
+                    _empty_observation_body(tool_name, arguments),
+                    in_body=True,
+                )
+            )
             return caveats
 
         unique_subIds = _unique_subIds(data)
@@ -954,39 +1118,72 @@ def _build_caveats(
         # obs from a few birders saturated maxResults — not real low effort).
         if count == 1:
             caveats.append(
-                "⚠️ SINGLE-RECORD CLAIM: only 1 observation returned. Do not "
-                "report this as a trend or pattern — N=1 is an anecdote, not a "
-                "frequency claim. Check the review status before treating as "
-                "established."
+                _caveat(
+                    CAVEAT_SINGLE_RECORD,
+                    "⚠️ SINGLE-RECORD CLAIM: only 1 observation returned. Do "
+                    "not report this as a trend or pattern — N=1 is an "
+                    "anecdote, not a frequency claim. Check the review status "
+                    "before treating as established.",
+                )
             )
         elif unique_subIds == 1:
             caveats.append(
-                f"⚠️ SINGLE-OBSERVER PROVENANCE: all {count} observations come "
-                f"from one checklist (one birder, one trip). Verify the review "
-                f"status on each record before treating as established — a "
-                f"single-checklist rare-bird record could be a misidentification."
+                _caveat(
+                    CAVEAT_SINGLE_OBSERVER,
+                    f"⚠️ SINGLE-OBSERVER PROVENANCE: all {count} observations "
+                    f"come from one checklist (one birder, one trip). Verify "
+                    f"the review status on each record before treating as "
+                    f"established — a single-checklist rare-bird record could "
+                    f"be a misidentification.",
+                )
             )
         elif not hit_cap and 1 < unique_subIds < _LOW_EFFORT_CHECKLIST_THRESHOLD:
             caveats.append(
-                f"⚠️ LOW SURVEY EFFORT: only {unique_subIds} distinct checklists "
-                f"contributed to these {count} observations. Absence of OTHER "
-                f"species in this area/window is much weaker evidence than in "
-                f"well-birded regions — it usually means no one looked, not no "
-                f"birds."
+                _caveat(
+                    CAVEAT_LOW_SURVEY_EFFORT,
+                    f"⚠️ LOW SURVEY EFFORT: only {unique_subIds} distinct "
+                    f"checklists contributed to these {count} observations. "
+                    f"Absence of OTHER species in this area/window is much "
+                    f"weaker evidence than in well-birded regions — it "
+                    f"usually means no one looked, not no birds.",
+                )
             )
         elif count < _SMALL_SAMPLE_THRESHOLD:
             caveats.append(
-                f"⚠️ SMALL SAMPLE: only {count} observations returned. Trends, "
-                f"'most common', and frequency claims are unreliable below "
-                f"{_SMALL_SAMPLE_THRESHOLD} records."
+                _caveat(
+                    CAVEAT_SMALL_SAMPLE,
+                    f"⚠️ SMALL SAMPLE: only {count} observations returned. "
+                    f"Trends, 'most common', and frequency claims are "
+                    f"unreliable below {_SMALL_SAMPLE_THRESHOLD} records.",
+                )
             )
 
         if hit_cap:
             caveats.append(
-                f"⚠️ POSSIBLY TRUNCATED: returned {count} observations, which "
-                f"hits the maxResults cap ({max_results}). The true total may "
-                f"be larger — re-run with a higher maxResults, a smaller back, "
-                f"or a smaller dist to confirm."
+                _caveat(
+                    CAVEAT_POSSIBLY_TRUNCATED,
+                    f"⚠️ POSSIBLY TRUNCATED: returned {count} observations, "
+                    f"which hits the maxResults cap ({max_results}). The true "
+                    f"total may be larger — re-run with a higher maxResults, "
+                    f"a smaller back, or a smaller dist to confirm.",
+                )
+            )
+
+        # NULL COUNTS. eBird lets an observer record presence as "X" instead
+        # of a number, which arrives as a missing howMany. Treating that as 0
+        # in a sum silently undercounts, and it is the single most misread
+        # field in this API — so it gets a code, not just a schema note.
+        missing_counts = sum(1 for obs in data if obs.get("howMany") is None)
+        if missing_counts:
+            caveats.append(
+                _caveat(
+                    CAVEAT_COUNT_NOT_REPORTED,
+                    f"⚠️ COUNTS NOT REPORTED: {missing_counts} of {count} "
+                    f"observations record presence without a number (eBird "
+                    f"'X'). Their howMany is null, which means PRESENT, NOT "
+                    f"ZERO. Any total summed over these rows is a lower "
+                    f"bound — do not present it as a population count.",
+                )
             )
 
         stale = _window_staleness_caveat(
@@ -1016,7 +1213,7 @@ def _window_staleness_caveat(
     observations: List[Dict[str, Any]],
     requested_back: Any,
     default_back: int,
-) -> Optional[str]:
+) -> Optional[Dict[str, Any]]:
     """Fires when the most recent observation in the result is much older than
     expected for the requested ``back`` window. Implies low birding effort
     rather than species turnover."""
@@ -1036,13 +1233,237 @@ def _window_staleness_caveat(
 
     days_old = (_now_naive_utc().date() - max_date.date()).days
     if days_old >= _STALE_WINDOW_MIN_DAYS and days_old > back / 2:
-        return (
+        return _caveat(
+            CAVEAT_WINDOW_STALENESS,
             f"⚠️ WINDOW STALENESS: most recent observation is {days_old} days "
             f"old (you requested back={back}). No fresh observations in this "
             f"window — suggests low birding effort recently, not necessarily "
-            f"species turnover."
+            f"species turnover.",
         )
     return None
+
+
+# ---- Structured output ----------------------------------------------------
+#
+# Built from the RAW upstream `data`, in one place, rather than from inside
+# the text formatters. That is deliberate: the formatters short-circuit on
+# empty results (`_empty_observation_body`, the no-hotspots branch), and a
+# structured builder living behind those early returns is exactly how a
+# server ends up advertising an outputSchema and then returning no
+# structuredContent on the zero-result path. Deriving from `data` makes the
+# empty case fall out as `rows: []` with no special handling to forget.
+
+
+def _structured_caveats(caveats: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Strip the internal render flag; emit only the wire fields."""
+    return [
+        {"code": c["code"], "message": c["message"]} for c in caveats
+    ]
+
+
+def _total_count(returned: int, cap: Any) -> Optional[int]:
+    """How many exist upstream, or None when that is genuinely unknown.
+
+    eBird returns no total alongside a result set. If the result came back
+    short of the cap, it is complete and `returned` IS the total — 0
+    included, which is a real answer meaning "none reported in this
+    window". If it came back AT the cap, more may exist and we do not know
+    how many, so the honest value is null. Reporting `returned` there would
+    dress a capped sample up as a complete census.
+    """
+    if isinstance(cap, int) and returned >= cap:
+        return None
+    return returned
+
+
+def _observation_rows(
+    observations: List[Dict[str, Any]],
+    *,
+    query_lat: Optional[float],
+    query_lng: Optional[float],
+) -> List[Dict[str, Any]]:
+    """eBird's own fields, unclipped and uncompacted.
+
+    The text may render these as a compact table or drop some at the byte
+    backstop; these rows never are. Truncating the machine-readable half
+    would defeat the point of having one.
+    """
+    rows: List[Dict[str, Any]] = []
+    for obs in observations:
+        raw_dt = obs.get("obsDt")
+        parsed = _parse_ebird_datetime(raw_dt)
+        row: Dict[str, Any] = {
+            "speciesCode": obs.get("speciesCode"),
+            "comName": obs.get("comName"),
+            "sciName": obs.get("sciName"),
+            # Raw first, ours second and clearly labelled, so a caller can
+            # tell eBird's value from our normalization of it.
+            "obsDt": raw_dt,
+            "obsDtIso": parsed.isoformat() if parsed else None,
+            # NOT defaulted to 0: a missing howMany means "present, count
+            # not reported", which is a different claim from zero.
+            "howMany": obs.get("howMany"),
+            "lat": obs.get("lat"),
+            "lng": obs.get("lng"),
+            "locId": obs.get("locId"),
+            "locName": obs.get("locName"),
+            "obsValid": obs.get("obsValid"),
+            "obsReviewed": obs.get("obsReviewed"),
+            "subId": obs.get("subId"),
+            "distance_km": None,
+        }
+        if (
+            query_lat is not None
+            and query_lng is not None
+            and obs.get("lat") is not None
+            and obs.get("lng") is not None
+        ):
+            try:
+                row["distance_km"] = round(
+                    _haversine_km(
+                        float(query_lat),
+                        float(query_lng),
+                        float(obs["lat"]),
+                        float(obs["lng"]),
+                    ),
+                    3,
+                )
+            except (TypeError, ValueError):
+                pass
+        # Every key is always present, even when null. Two reasons: a
+        # caller gets one predictable row shape instead of having to probe
+        # for optional keys, and null is itself information here — howMany
+        # null means "present, count not reported", distance_km null means
+        # "not a proximity query". Correspondingly every field is declared
+        # nullable in the schema, because eBird genuinely omits fields
+        # across endpoints and detail levels, and a schema must not be
+        # violated by real data.
+        rows.append(row)
+    return rows
+
+
+def _hotspot_rows(
+    hotspots: List[Dict[str, Any]],
+    *,
+    query_lat: Optional[float],
+    query_lng: Optional[float],
+) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for h in hotspots:
+        latest = h.get("latestObsDt")
+        row: Dict[str, Any] = {
+            "locId": h.get("locId"),
+            "locName": h.get("locName"),
+            "lat": h.get("lat"),
+            "lng": h.get("lng"),
+            "numSpeciesAllTime": h.get("numSpeciesAllTime"),
+            "latestObsDt": latest,
+            # The activity signal that species totals cannot provide.
+            "days_since_last_obs": _days_ago(latest) if latest else None,
+            "distance_km": None,
+        }
+        if (
+            query_lat is not None
+            and query_lng is not None
+            and h.get("lat") is not None
+            and h.get("lng") is not None
+        ):
+            try:
+                row["distance_km"] = round(
+                    _haversine_km(
+                        float(query_lat),
+                        float(query_lng),
+                        float(h["lat"]),
+                        float(h["lng"]),
+                    ),
+                    3,
+                )
+            except (TypeError, ValueError):
+                pass
+        rows.append(row)
+    return rows
+
+
+def _build_structured(
+    tool_name: str,
+    data: Any,
+    arguments: Dict[str, Any],
+    plugin_config: EBirdPluginConfig,
+    *,
+    url: str,
+    params: Dict[str, Any],
+    caveats: List[Dict[str, Any]],
+    retrieved_at: str,
+) -> Optional[Dict[str, Any]]:
+    """Assemble the declared envelope, or None for tools without a schema.
+
+    Never returns None for a tool that declares an outputSchema — including
+    when `data` is empty. A declared schema is binding: advertising one and
+    then omitting structuredContent is a conformance break a validating
+    client would be right to reject.
+    """
+    if tool_name not in TOOL_OUTPUT_SCHEMAS:
+        return None
+    if not isinstance(data, list):
+        data = []
+
+    envelope: Dict[str, Any] = {
+        "query": {"source": url, "params": dict(params)},
+        "caveats": _structured_caveats(caveats),
+    }
+
+    if tool_name in _OBSERVATION_TOOLS:
+        nearby = tool_name in _NEARBY_OBSERVATION_TOOLS
+        rows = _observation_rows(
+            data,
+            query_lat=arguments.get("lat") if nearby else None,
+            query_lng=arguments.get("lng") if nearby else None,
+        )
+        cap = arguments.get("maxResults", plugin_config.default_max_results)
+        envelope["rows"] = rows
+        envelope["summary"] = {
+            "returned": len(rows),
+            "total_count": _total_count(len(rows), cap),
+            "truncated": False,
+            "retrieved_at": retrieved_at,
+            # Grain matters: "how many species" is not "how many rows", and
+            # "how much evidence" is checklists, not rows. Reporting all
+            # three means a caller never has to guess which one a bare
+            # count meant.
+            "distinct_species": len(
+                {r.get("speciesCode") for r in rows if r.get("speciesCode")}
+            ),
+            "distinct_checklists": len(
+                {r.get("subId") for r in rows if r.get("subId")}
+            ),
+            "distinct_locations": len(
+                {r.get("locId") for r in rows if r.get("locId")}
+            ),
+            "counts_not_reported": sum(
+                1 for r in rows if r.get("howMany") is None
+            ),
+        }
+        return envelope
+
+    # Hotspots. get_hotspots/get_nearby_hotspots take no maxResults, so the
+    # returned set is always complete and total_count is never null.
+    nearby = tool_name == "get_nearby_hotspots"
+    rows = _hotspot_rows(
+        data,
+        query_lat=arguments.get("lat") if nearby else None,
+        query_lng=arguments.get("lng") if nearby else None,
+    )
+    envelope["rows"] = rows
+    envelope["summary"] = {
+        "returned": len(rows),
+        "total_count": len(rows),
+        "truncated": False,
+        "retrieved_at": retrieved_at,
+        "active_hotspots": sum(
+            1 for r in rows if r.get("latestObsDt")
+        ),
+    }
+    return envelope
 
 
 # ---- Body formatters ------------------------------------------------------
@@ -1246,12 +1667,13 @@ def _join_with_size_cap(blocks: List[str], *, sep: str) -> str:
         if size + added > _MAX_BODY_BYTES and out:
             shown = len(out)
             out.append(
-                f"⚠️ RESPONSE SIZE CEILING: showing {shown} of {total} records "
+                f"{_SIZE_CEILING_MARKER} showing {shown} of {total} records "
                 f"— the formatted response hit this server's "
                 f"{_MAX_BODY_BYTES // 1024} KB backstop. The remaining "
                 f"{total - shown} records were returned by eBird but not "
-                f"rendered. Re-run with a smaller back, dist, or maxResults "
-                f"for a complete, narrower result."
+                f"rendered here; they ARE present in full in this response's "
+                f"structuredContent. Re-run with a smaller back, dist, or "
+                f"maxResults for a complete, narrower text rendering."
             )
             break
         out.append(block)
