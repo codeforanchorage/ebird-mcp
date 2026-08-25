@@ -66,6 +66,58 @@ def _call(name: str = "ebird__get_hotspots", **params) -> Dict[str, Any]:
     return request
 
 
+class ProtocolNegotiationTests(unittest.IsolatedAsyncioTestCase):
+    """Version negotiation, including the revision we deliberately refuse."""
+
+    async def _initialize(self, requested: Optional[str]) -> Dict[str, Any]:
+        server = MCPServer(_StubPluginManager())
+        params: Dict[str, Any] = {}
+        if requested is not None:
+            params["protocolVersion"] = requested
+        response = await server.handle_request(
+            {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": params}
+        )
+        return response["result"]
+
+    async def test_supported_versions_are_echoed_back(self):
+        for version in MCPServer.SUPPORTED_PROTOCOL_VERSIONS:
+            with self.subTest(version=version):
+                result = await self._initialize(version)
+                self.assertEqual(result["protocolVersion"], version)
+
+    async def test_2026_07_28_is_not_advertised_as_supported(self):
+        """It replaces initialize with server/discover — a real migration.
+
+        Listing it would be a claim we implement a handshake we do not.
+        """
+        self.assertNotIn("2026-07-28", MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
+
+    async def test_unsupported_version_downgrades_to_newest_supported(self):
+        result = await self._initialize("2026-07-28")
+        self.assertEqual(
+            result["protocolVersion"],
+            MCPServer.SUPPORTED_PROTOCOL_VERSIONS[-1],
+            "An unsupported request must be answered with the newest "
+            "revision we really speak, so the client can decide.",
+        )
+
+    async def test_newest_supported_is_last_in_the_tuple(self):
+        """The downgrade path indexes [-1]; ordering is load-bearing."""
+        versions = list(MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
+        self.assertEqual(
+            versions,
+            sorted(versions),
+            "SUPPORTED_PROTOCOL_VERSIONS must stay in ascending date order",
+        )
+
+    async def test_missing_version_still_initializes(self):
+        result = await self._initialize(None)
+        self.assertEqual(
+            result["protocolVersion"],
+            MCPServer.SUPPORTED_PROTOCOL_VERSIONS[-1],
+        )
+
+
 class UnknownToolTests(unittest.IsolatedAsyncioTestCase):
     """An unknown tool name is a caller error (-32602), not a fault."""
 
