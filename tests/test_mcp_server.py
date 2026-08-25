@@ -124,6 +124,87 @@ class UnknownToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class MalformedCallToolRequestTests(unittest.IsolatedAsyncioTestCase):
+    """A request that never described a valid call is -32602, not -32603.
+
+    The `arguments` case is the nastier of the two: before the fix a
+    non-object reached the plugin, which called dict()/.get() on it, and
+    the caller got a raw Python message back as a tool RESULT with
+    isError: true — as though the tool had run and failed.
+    """
+
+    async def _post(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        self.manager = _StubPluginManager()
+        server = MCPServer(self.manager)
+        return await server.handle_request(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}
+        )
+
+    async def test_missing_name_is_invalid_params(self):
+        response = await self._post({"arguments": {}})
+        self.assertEqual(response["error"]["code"], -32602)
+        self.assertEqual(response["error"]["message"], "Invalid params")
+
+    async def test_empty_name_is_invalid_params(self):
+        response = await self._post({"name": "", "arguments": {}})
+        self.assertEqual(response["error"]["code"], -32602)
+
+    async def test_string_arguments_is_invalid_params(self):
+        response = await self._post(
+            {"name": "ebird__get_hotspots", "arguments": "oops"}
+        )
+        self.assertEqual(response["error"]["code"], -32602)
+        self.assertIn("must be an object", response["error"]["data"])
+        self.assertIn("str", response["error"]["data"])
+
+    async def test_list_arguments_is_invalid_params(self):
+        response = await self._post(
+            {"name": "ebird__get_hotspots", "arguments": [1, 2]}
+        )
+        self.assertEqual(response["error"]["code"], -32602)
+
+    async def test_malformed_arguments_never_reaches_the_plugin(self):
+        """The plugin must not be handed a shape it cannot process.
+
+        This is what turned a protocol error into a fake tool failure.
+        """
+        await self._post({"name": "ebird__get_hotspots", "arguments": "oops"})
+        self.assertEqual(
+            self.manager.calls,
+            [],
+            "execute_tool must not be called for a malformed request",
+        )
+
+    async def test_no_python_internals_leak_to_the_caller(self):
+        response = await self._post(
+            {"name": "ebird__get_hotspots", "arguments": "oops"}
+        )
+        blob = str(response)
+        self.assertNotIn("dictionary update sequence", blob)
+        self.assertNotIn("has no attribute", blob)
+
+    async def test_omitting_arguments_entirely_is_valid(self):
+        """Absent `arguments` defaults to {} — that IS a valid call."""
+        response = await self._post({"name": "ebird__get_hotspots"})
+        self.assertNotIn("error", response)
+        self.assertEqual(self.manager.calls, [("ebird__get_hotspots", {})])
+
+    async def test_malformed_request_logged_as_warning(self):
+        manager = _StubPluginManager()
+        server = MCPServer(manager)
+        with self.assertLogs("core.mcp_server", level="DEBUG") as captured:
+            await server.handle_request(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "ebird__get_hotspots", "arguments": "x"},
+                }
+            )
+        errors = [r for r in captured.records if r.levelno >= logging.ERROR]
+        self.assertEqual(errors, [], "a malformed request is not a server fault")
+
+
 class GenuineFaultTests(unittest.IsolatedAsyncioTestCase):
     """The mapping must not quietly swallow real failures."""
 
