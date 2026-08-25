@@ -111,6 +111,30 @@ _COMPACT_FORMAT_THRESHOLD = 20         # above this many records → compact tab
 _MAX_BODY_BYTES = 200 * 1024           # formatted-body byte ceiling (truncates at a record boundary)
 
 
+# Human-readable display names. tools/list otherwise carries only the
+# prefixed wire name (ebird__get_nearby_notable_observations), which is a
+# stable identifier but reads badly anywhere a client shows tools to a
+# person. Clients resolve a display name as title -> annotations.title ->
+# name; `name` itself is unchanged, so nothing that dispatches on it moves.
+#
+# Kept as a map rather than a `title=` on each ToolDefinition so the whole
+# display surface is legible in one place — and so the tests below can check
+# it in both directions (a tool with no entry, and an entry for a tool that
+# no longer exists, both fail).
+TOOL_TITLES = {
+    "get_recent_observations": "Recent Observations",
+    "get_recent_observations_for_species": "Observations by Species",
+    "get_notable_observations": "Notable Observations",
+    "get_nearby_observations": "Nearby Observations",
+    "get_nearby_notable_observations": "Nearby Notable Observations",
+    "get_nearby_observations_for_species": "Nearby Observations by Species",
+    "get_hotspots": "Hotspots",
+    "get_nearby_hotspots": "Nearby Hotspots",
+    "get_taxonomy": "Taxonomy Lookup",
+    "get_taxonomy_forms": "Taxonomy Forms",
+}
+
+
 _RETRY = retry(
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=1, min=1, max=4),
@@ -263,7 +287,7 @@ class EBirdPlugin(MCPPlugin):
             "generalize to regional or national rarity from a notable list."
         )
 
-        return [
+        tools = [
             ToolDefinition(
                 name="get_recent_observations",
                 description=(
@@ -470,6 +494,13 @@ class EBirdPlugin(MCPPlugin):
                 },
             ),
         ]
+
+        # Attach display titles. Done here rather than inline on each
+        # ToolDefinition so the map above stays the single legible
+        # inventory of the display surface.
+        for tool in tools:
+            tool.title = TOOL_TITLES.get(tool.name)
+        return tools
 
     # ---- Tool execution ---------------------------------------------------
 
