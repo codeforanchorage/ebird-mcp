@@ -1,7 +1,5 @@
 """Pydantic configuration schema for the eBird plugin."""
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -22,13 +20,16 @@ class EBirdPluginConfig(BaseModel):
         description="Base URL of the eBird API",
     )
     timeout: int = Field(
-        default=25,
+        default=20,
         ge=1,
-        le=120,
+        le=28,
         description=(
-            "HTTP request timeout in seconds for calls to api.ebird.org. Keep at "
-            "least 5 seconds below the Lambda timeout so the function has time to "
-            "format and return a clean error before AWS pulls the plug."
+            "HTTP request timeout in seconds for calls to api.ebird.org. MUST "
+            "stay below the Lambda timeout (28s, itself under API Gateway's "
+            "hard 29s ceiling) so a hung eBird call produces a readable "
+            "'upstream timed out' tool error instead of the Lambda being "
+            "killed mid-flight and the caller getting an opaque 502. The "
+            "default of 20 leaves ~8s to format and return."
         ),
     )
     default_max_results: int = Field(

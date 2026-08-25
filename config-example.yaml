@@ -19,7 +19,13 @@ plugins:
     enabled: true                 # Must be true; the only plugin in this fork.
     api_key: "REPLACE_ME"         # eBird API key from https://ebird.org/api/keygen
     base_url: "https://api.ebird.org/v2"
-    timeout: 25                   # HTTP timeout in seconds; keep <= lambda_timeout-5 for clean errors
+    # Per-upstream-request HTTP timeout. MUST stay below lambda_timeout (28s)
+    # or a hung eBird call outlives the Lambda: the function is killed
+    # mid-flight and the caller gets an opaque 502 instead of a readable
+    # "upstream timed out" tool error. 20s leaves ~8s to format and return.
+    # Observed worst-case prod Lambda duration is 1.4s, so this is far above
+    # anything legitimate.
+    timeout: 20
     default_max_results: 100      # Default if caller omits maxResults
     default_back: 14              # Default "back" (days) if caller omits — eBird hard-caps at 30
 
@@ -28,7 +34,15 @@ aws:
   region: "us-west-2"             # AWS region for Lambda + API Gateway
   lambda_name: "ebird-mcp"        # Lambda function name (Terraform may override via tfvars)
   lambda_memory: 512              # Lambda memory in MB (128-10240)
-  lambda_timeout: 30              # Lambda timeout in seconds (max 900)
+  # MUST stay under the API Gateway integration timeout (29s, a hard REST
+  # limit that is not adjustable). Above it the gateway returns 504 while the
+  # Lambda keeps running -- billing compute the client already gave up on and,
+  # worse, holding one of the reserved-concurrency slots for the remainder.
+  # 28s guarantees the Lambda self-terminates first, so the timeout is
+  # attributed in Lambda's own metrics and the slot frees at once.
+  # NOTE: this value takes precedence over `lambda_timeout` in
+  # terraform/aws/*.tfvars (see terraform/aws/main.tf locals) -- change it HERE.
+  lambda_timeout: 28
 
 logging:
   level: "INFO"                   # DEBUG, INFO, WARNING, ERROR
