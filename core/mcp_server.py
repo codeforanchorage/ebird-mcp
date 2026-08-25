@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from core.interfaces import UnknownToolError
+from core.interfaces import InvalidToolParamsError, UnknownToolError
 from core.logging_utils import (
     format_jsonrpc_request_log,
     format_jsonrpc_response_log,
@@ -14,6 +14,12 @@ from core.logging_utils import (
 from core.plugin_manager import PluginManager
 
 logger = logging.getLogger(__name__)
+
+
+def _describe_invalid_params(exc: "InvalidToolParamsError") -> Tuple[int, str, str]:
+    # The request never described a valid call, so `data` says which part
+    # of the CallToolRequest schema it failed.
+    return -32602, "Invalid params", str(exc)
 
 
 def _describe_unknown_tool(exc: UnknownToolError) -> Tuple[int, str, str]:
@@ -33,6 +39,7 @@ def _describe_unknown_tool(exc: UnknownToolError) -> Tuple[int, str, str]:
 # Order matters only if two entries could match the same exception.
 _CALLER_ERRORS: Tuple[Tuple[type, Any], ...] = (
     (UnknownToolError, _describe_unknown_tool),
+    (InvalidToolParamsError, _describe_invalid_params),
 )
 
 
@@ -261,8 +268,22 @@ class MCPServer:
         tool_name = params.get("name")
         arguments = params.get("arguments", {})
 
+        # Validate the request shape before dispatch. Both of these are
+        # malformed CallToolRequests, not server faults: without this, a
+        # missing name surfaced as -32603 "Internal error", and a non-object
+        # `arguments` reached the plugin — which called dict()/.get() on it
+        # and handed the caller a raw Python message ("dictionary update
+        # sequence element #0 has length 1; 2 is required") dressed up as a
+        # tool RESULT with isError: true, as though the tool had run.
         if not tool_name:
-            raise ValueError("Tool name is required")
+            raise InvalidToolParamsError(
+                "Missing required parameter 'name' (the tool to call)"
+            )
+        if not isinstance(arguments, dict):
+            raise InvalidToolParamsError(
+                f"Parameter 'arguments' must be an object, got "
+                f"{type(arguments).__name__}"
+            )
 
         result = await self.plugin_manager.execute_tool(tool_name, arguments)
 
