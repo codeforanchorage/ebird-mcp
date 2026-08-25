@@ -4,8 +4,9 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+from core.interfaces import UnknownToolError
 from core.logging_utils import (
     format_jsonrpc_request_log,
     format_jsonrpc_response_log,
@@ -13,6 +14,39 @@ from core.logging_utils import (
 from core.plugin_manager import PluginManager
 
 logger = logging.getLogger(__name__)
+
+
+def _describe_unknown_tool(exc: UnknownToolError) -> Tuple[int, str, str]:
+    # Shape follows the tools spec's own example:
+    # {"code": -32602, "message": "Unknown tool: <name>"}.
+    data = f"Available tools: {exc.available}" if exc.available else str(exc)
+    return -32602, str(exc), data
+
+
+# Caller errors: the client's mistake, not a server fault. Each gets its own
+# JSON-RPC code, a WARNING-level log with no traceback, and — unlike a
+# genuine fault — a `data` payload the caller can act on, because there is
+# nothing sensitive in "you named a tool that does not exist".
+#
+# Deliberately a mapping rather than a chain of conditionals: the next
+# caller-error code should be one more row here, not another nested branch.
+# Order matters only if two entries could match the same exception.
+_CALLER_ERRORS: Tuple[Tuple[type, Any], ...] = (
+    (UnknownToolError, _describe_unknown_tool),
+)
+
+
+def _classify_error(exc: Exception) -> Tuple[int, str, Optional[str], bool]:
+    """Map an exception to (code, message, data, is_caller_error).
+
+    ``data`` is None for genuine faults; the caller substitutes a scrubbed
+    correlation ID so exception text never reaches the client.
+    """
+    for exc_type, describe in _CALLER_ERRORS:
+        if isinstance(exc, exc_type):
+            code, message, data = describe(exc)
+            return code, message, data, True
+    return -32603, "Internal error", None, False
 
 
 class MCPServer:
@@ -145,36 +179,52 @@ class MCPServer:
 
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
-            # Don't echo exception text to the client — it can leak file
-            # paths, library internals, or traceback fragments. Mint a
-            # correlation ID and log the full exception to CloudWatch.
-            error_id = uuid.uuid4().hex
+            code, message, data, is_caller_error = _classify_error(e)
+
+            # Genuine faults: don't echo exception text to the client — it
+            # can leak file paths, library internals, or traceback
+            # fragments. Mint a correlation ID and log the full exception to
+            # CloudWatch. Caller errors carry their own actionable `data`
+            # and need no correlation ID; the client can fix the request.
+            error_id = None
+            if not is_caller_error:
+                error_id = uuid.uuid4().hex
+                data = f"Error ID: {error_id}"
+
             error_response = {
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "error": {
-                    "code": -32603,
-                    "message": "Internal error",
-                    "data": f"Error ID: {error_id}",
+                    "code": code,
+                    "message": message,
+                    "data": data,
                 },
             }
             response_log_data = format_jsonrpc_response_log(
                 request_id=request_id,
                 method=method,
-                error={"code": -32603, "message": "Internal error", "data": str(e)},
+                error={"code": code, "message": message, "data": str(e)},
                 duration_ms=duration_ms,
             )
             if session_id:
                 response_log_data["mcp_session_id"] = session_id
-            logger.error(
-                f"Error handling JSON-RPC request {method} [error_id={error_id}]: {e}",
-                extra={
-                    **response_log_data,
-                    "error_type": type(e).__name__,
-                    "error_id": error_id,
-                },
-                exc_info=True,
-            )
+
+            extra = {**response_log_data, "error_type": type(e).__name__}
+            if is_caller_error:
+                # No traceback: a malformed request is not a server fault,
+                # and a stack trace here is noise that hides real ones.
+                logger.warning(
+                    f"Caller error handling JSON-RPC request {method}: {e}",
+                    extra=extra,
+                )
+            else:
+                extra["error_id"] = error_id
+                logger.error(
+                    f"Error handling JSON-RPC request {method} "
+                    f"[error_id={error_id}]: {e}",
+                    extra=extra,
+                    exc_info=True,
+                )
             if is_notification:
                 return None
             return error_response
