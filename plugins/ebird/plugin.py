@@ -46,10 +46,12 @@ from plugins.ebird.schemas import (
     CAVEAT_ABSENCE_OF_EVIDENCE,
     CAVEAT_COUNT_NOT_REPORTED,
     CAVEAT_LOW_SURVEY_EFFORT,
+    CAVEAT_NON_SPECIES_TAXA,
     CAVEAT_NOTABLE_IS_LOCAL,
     CAVEAT_ONE_RECORD_PER_SPECIES,
     CAVEAT_POSSIBLY_TRUNCATED,
     CAVEAT_RESPONSE_SIZE_CEILING,
+    CAVEAT_ROWS_TRUNCATED,
     CAVEAT_SINGLE_OBSERVER,
     CAVEAT_SINGLE_RECORD,
     CAVEAT_SMALL_SAMPLE,
@@ -58,6 +60,8 @@ from plugins.ebird.schemas import (
     CAVEAT_WINDOW_STALENESS,
     HOTSPOTS_SCHEMA,
     OBSERVATIONS_SCHEMA,
+    TAXONOMY_FORMS_SCHEMA,
+    TAXONOMY_SCHEMA,
 )
 
 logger = logging.getLogger(__name__)
@@ -132,6 +136,28 @@ _MAX_RESULTS_CEILING = 1000            # schema maximum + clamp ceiling for maxR
 _COMPACT_FORMAT_THRESHOLD = 20         # above this many records → compact table
 _MAX_BODY_BYTES = 200 * 1024           # formatted-body byte ceiling (truncates at a record boundary)
 
+# Row ceiling for the taxonomy tool's STRUCTURED output, and the one place
+# in this server where the machine-readable channel is deliberately not
+# complete. The rule elsewhere is that structuredContent ships everything
+# the text clipped — truncating the machine half defeats its purpose — but
+# taxonomy cannot honour it. Measured against the bundled snapshot:
+#
+#     cat=species   11,167 entries   3.60 MB raw / 2.52 MB trimmed
+#     all categories 17,849 entries  6.00 MB raw
+#
+# Lambda's synchronous response payload limit is 6 MB, before the JSON-RPC
+# envelope and the text block. Shipping the full set would turn the most
+# frequently called tool in the workflow (it is step 1 of every lookup)
+# into a multi-megabyte response, and for `cat` values covering the whole
+# taxonomy it would fail outright rather than truncate.
+#
+# So the cap stands at the same 1000 as _MAX_RESULTS_CEILING (~230 KB
+# trimmed), and the response says so loudly: summary.total_count carries
+# the TRUE total — knowable here because the bundle is local — alongside
+# truncated=true and a ROWS_TRUNCATED caveat. Incomplete and honest about
+# it beats either silently short or not returning at all.
+_MAX_STRUCTURED_TAXONOMY_ROWS = 1000
+
 # Marker the size backstop stamps into the TEXT body. Shared so the caveat
 # builder can detect the clip without re-deriving byte sizes, and so the
 # wording can change without breaking that detection. Only the text is ever
@@ -176,6 +202,8 @@ TOOL_OUTPUT_SCHEMAS = {
     "get_nearby_observations_for_species": OBSERVATIONS_SCHEMA,
     "get_hotspots": HOTSPOTS_SCHEMA,
     "get_nearby_hotspots": HOTSPOTS_SCHEMA,
+    "get_taxonomy": TAXONOMY_SCHEMA,
+    "get_taxonomy_forms": TAXONOMY_FORMS_SCHEMA,
 }
 
 
@@ -1077,6 +1105,45 @@ def _build_caveats(
                 )
             )
 
+        if tool_name == "get_taxonomy" and isinstance(data, list):
+            total = len(data)
+            if total > _MAX_STRUCTURED_TAXONOMY_ROWS:
+                caveats.append(
+                    _caveat(
+                        CAVEAT_ROWS_TRUNCATED,
+                        f"⚠️ ROWS TRUNCATED: {total:,} taxonomy entries match "
+                        f"this query but only the first "
+                        f"{_MAX_STRUCTURED_TAXONOMY_ROWS:,} are in "
+                        f"structuredContent — the full set is several "
+                        f"megabytes and would exceed the response limit. "
+                        f"This is the one place where the machine-readable "
+                        f"rows are incomplete. Narrow with `cat`, or do not "
+                        f"treat this list as the whole taxonomy.",
+                    )
+                )
+            # A hybrid, spuh or slash is an observation the observer could
+            # NOT resolve to one species. Counting them as species inflates
+            # a total, and the text's per-record flags do not survive into
+            # an aggregate.
+            non_species = {
+                e.get("category")
+                for e in data[:_MAX_STRUCTURED_TAXONOMY_ROWS]
+                if e.get("category") and e.get("category") != "species"
+            }
+            if non_species:
+                listed = ", ".join(sorted(non_species))
+                caveats.append(
+                    _caveat(
+                        CAVEAT_NON_SPECIES_TAXA,
+                        f"⚠️ NON-SPECIES TAXA: these results include "
+                        f"categories that are not full species ({listed}). "
+                        f"A hybrid, slash or 'spuh' is a record the observer "
+                        f"could not resolve to one species — do not count "
+                        f"them toward a species total. Filter on the `category` "
+                        f"field.",
+                    )
+                )
+
         if _text_was_clipped(body):
             caveats.append(
                 _caveat(
@@ -1384,6 +1451,29 @@ def _hotspot_rows(
     return rows
 
 
+# Fields a caller can act on. eBird taxonomy entries also carry taxonOrder,
+# familyCode, comNameCodes and sciNameCodes; those are internal ordering
+# keys and search indices — taxonOrder is renumbered with each annual
+# release — so they are omitted rather than shipped because they exist.
+_TAXONOMY_ROW_FIELDS = (
+    "speciesCode",
+    "comName",
+    "sciName",
+    "category",
+    "order",
+    "familyComName",
+    "familySciName",
+    "bandingCodes",
+)
+
+
+def _taxonomy_rows(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {field: entry.get(field) for field in _TAXONOMY_ROW_FIELDS}
+        for entry in entries
+    ]
+
+
 def _build_structured(
     tool_name: str,
     data: Any,
@@ -1442,6 +1532,43 @@ def _build_structured(
             "counts_not_reported": sum(
                 1 for r in rows if r.get("howMany") is None
             ),
+        }
+        return envelope
+
+    if tool_name == "get_taxonomy":
+        # The one deliberately-capped structured channel; see
+        # _MAX_STRUCTURED_TAXONOMY_ROWS for the measurements behind it.
+        total = len(data)
+        shown = data[:_MAX_STRUCTURED_TAXONOMY_ROWS]
+        rows = _taxonomy_rows(shown)
+        categories: Dict[str, int] = {}
+        for row in rows:
+            category = row.get("category")
+            if category:
+                categories[category] = categories.get(category, 0) + 1
+        envelope["rows"] = rows
+        envelope["summary"] = {
+            "returned": len(rows),
+            # Knowable exactly, because get_taxonomy is served from the
+            # local bundle. Truncation here does not make the total
+            # unknown, so this stays a real number rather than null.
+            "total_count": total,
+            "truncated": total > len(rows),
+            "retrieved_at": retrieved_at,
+            "categories": categories,
+        }
+        return envelope
+
+    if tool_name == "get_taxonomy_forms":
+        # Upstream returns a bare list of code strings.
+        codes = [c for c in data if isinstance(c, str)]
+        rows = [{"speciesCode": code} for code in codes]
+        envelope["rows"] = rows
+        envelope["summary"] = {
+            "returned": len(rows),
+            "total_count": len(rows),
+            "truncated": False,
+            "retrieved_at": retrieved_at,
         }
         return envelope
 

@@ -34,11 +34,15 @@ from plugins.ebird.schemas import (
     ALL_CAVEAT_CODES,
     CAVEAT_ABSENCE_OF_EVIDENCE,
     CAVEAT_COUNT_NOT_REPORTED,
+    CAVEAT_NON_SPECIES_TAXA,
     CAVEAT_POSSIBLY_TRUNCATED,
     CAVEAT_RESPONSE_SIZE_CEILING,
+    CAVEAT_ROWS_TRUNCATED,
     CAVEAT_UNCOMPARABLE_SPECIES_TOTALS,
     HOTSPOTS_SCHEMA,
     OBSERVATIONS_SCHEMA,
+    TAXONOMY_FORMS_SCHEMA,
+    TAXONOMY_SCHEMA,
 )
 
 _FIXED_NOW = dt.datetime(2026, 5, 13, 12, 0, 0)
@@ -535,6 +539,198 @@ class TextClippingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.structured_content["rows"]), 25)
 
 
+def _taxon(**overrides: Any) -> Dict[str, Any]:
+    entry = {
+        "speciesCode": "amerob",
+        "comName": "American Robin",
+        "sciName": "Turdus migratorius",
+        "category": "species",
+        "order": "Passeriformes",
+        "familyComName": "Thrushes and Allies",
+        "familySciName": "Turdidae",
+        "bandingCodes": ["AMRO"],
+        # Internal fields that must NOT be re-exported.
+        "taxonOrder": 28150.0,
+        "familyCode": "turdid1",
+        "comNameCodes": ["AMRO"],
+        "sciNameCodes": ["TUMI"],
+    }
+    entry.update(overrides)
+    return entry
+
+
+class TaxonomyStructureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_populated_taxonomy_conforms(self):
+        result = await _run("get_taxonomy", [_taxon(), _taxon(speciesCode="bkcchi")])
+        _validate(TAXONOMY_SCHEMA, result.structured_content)
+        self.assertEqual(result.structured_content["summary"]["returned"], 2)
+
+    async def test_empty_taxonomy_conforms(self):
+        result = await _run("get_taxonomy", [])
+        self.assertIsNotNone(result.structured_content)
+        _validate(TAXONOMY_SCHEMA, result.structured_content)
+        self.assertEqual(result.structured_content["summary"]["total_count"], 0)
+
+    async def test_internal_ordering_keys_are_not_re_exported(self):
+        """A field invites use; taxonOrder is renumbered every year."""
+        result = await _run("get_taxonomy", [_taxon()])
+        row = result.structured_content["rows"][0]
+        for internal in ("taxonOrder", "familyCode", "comNameCodes", "sciNameCodes"):
+            self.assertNotIn(internal, row)
+
+    async def test_banding_codes_are_exposed_as_a_distinct_field(self):
+        """Kept precisely because they are NOT speciesCodes."""
+        result = await _run("get_taxonomy", [_taxon()])
+        row = result.structured_content["rows"][0]
+        self.assertEqual(row["bandingCodes"], ["AMRO"])
+        self.assertEqual(row["speciesCode"], "amerob")
+
+    async def test_category_breakdown_is_reported(self):
+        result = await _run(
+            "get_taxonomy",
+            [_taxon(), _taxon(category="hybrid"), _taxon(category="hybrid")],
+        )
+        self.assertEqual(
+            result.structured_content["summary"]["categories"],
+            {"species": 1, "hybrid": 2},
+        )
+
+    async def test_non_species_taxa_raise_a_coded_caveat(self):
+        result = await _run(
+            "get_taxonomy", [_taxon(), _taxon(category="spuh")]
+        )
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertIn(CAVEAT_NON_SPECIES_TAXA, codes)
+
+    async def test_pure_species_result_raises_no_such_caveat(self):
+        result = await _run("get_taxonomy", [_taxon(), _taxon()])
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertNotIn(CAVEAT_NON_SPECIES_TAXA, codes)
+
+
+class TaxonomyTruncationTests(unittest.IsolatedAsyncioTestCase):
+    """The one deliberately-incomplete structured channel must say so."""
+
+    def _many(self, n: int) -> List[Dict[str, Any]]:
+        return [_taxon(speciesCode=f"sp{i:05d}") for i in range(n)]
+
+    async def test_rows_are_capped(self):
+        result = await _run("get_taxonomy", self._many(2500))
+        _validate(TAXONOMY_SCHEMA, result.structured_content)
+        self.assertEqual(
+            len(result.structured_content["rows"]),
+            plugin_module._MAX_STRUCTURED_TAXONOMY_ROWS,
+        )
+
+    async def test_truncation_reports_the_true_total_not_the_capped_one(self):
+        result = await _run("get_taxonomy", self._many(2500))
+        summary = result.structured_content["summary"]
+        self.assertEqual(
+            summary["total_count"],
+            2500,
+            "The bundle is local, so the real total is knowable. "
+            "Truncating rows must not make the count a lie.",
+        )
+        self.assertIs(summary["truncated"], True)
+        self.assertEqual(
+            summary["returned"],
+            plugin_module._MAX_STRUCTURED_TAXONOMY_ROWS,
+        )
+
+    async def test_truncation_raises_a_coded_caveat(self):
+        result = await _run("get_taxonomy", self._many(2500))
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertIn(
+            CAVEAT_ROWS_TRUNCATED,
+            codes,
+            "Rows were dropped from the machine-readable channel; that "
+            "must never be silent.",
+        )
+
+    async def test_under_the_cap_is_not_marked_truncated(self):
+        result = await _run("get_taxonomy", self._many(50))
+        summary = result.structured_content["summary"]
+        self.assertIs(summary["truncated"], False)
+        self.assertEqual(summary["total_count"], 50)
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertNotIn(CAVEAT_ROWS_TRUNCATED, codes)
+
+    async def test_real_bundle_scale_stays_within_the_payload_budget(self):
+        """The reason the cap exists, checked against real data.
+
+        Skipped when the deploy-time bundle is absent (it is gitignored).
+        """
+        import json
+        from pathlib import Path
+
+        bundle = (
+            Path(plugin_module.__file__).parent / "data" / "taxonomy.json"
+        )
+        if not bundle.exists():
+            self.skipTest("taxonomy bundle not built locally")
+        entries = json.loads(bundle.read_text(encoding="utf-8"))
+        species = [e for e in entries if e.get("category") == "species"]
+        result = await _run("get_taxonomy", species)
+        payload = result.structured_content
+        _validate(TAXONOMY_SCHEMA, payload)
+        self.assertEqual(payload["summary"]["total_count"], len(species))
+        self.assertIs(payload["summary"]["truncated"], True)
+        size_mb = len(json.dumps(payload)) / 1024 / 1024
+        self.assertLess(
+            size_mb,
+            1.0,
+            f"structured taxonomy payload is {size_mb:.2f} MB; the cap "
+            "exists to keep this well under Lambda's 6 MB response limit",
+        )
+
+
+class TaxonomyFormsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_forms_conform_and_are_complete(self):
+        result = await _run(
+            "get_taxonomy_forms", ["yerwar", "yerwar1", "yerwar2"],
+            {"speciesCode": "yerwar"},
+        )
+        _validate(TAXONOMY_FORMS_SCHEMA, result.structured_content)
+        summary = result.structured_content["summary"]
+        self.assertEqual(summary["returned"], 3)
+        self.assertEqual(summary["total_count"], 3)
+        self.assertIs(summary["truncated"], False)
+
+    async def test_form_codes_become_rows(self):
+        result = await _run(
+            "get_taxonomy_forms", ["yerwar", "yerwar1"],
+            {"speciesCode": "yerwar"},
+        )
+        self.assertEqual(
+            [r["speciesCode"] for r in result.structured_content["rows"]],
+            ["yerwar", "yerwar1"],
+        )
+
+    async def test_multiple_forms_raise_the_ambiguity_caveat(self):
+        result = await _run(
+            "get_taxonomy_forms", ["yerwar", "yerwar1"],
+            {"speciesCode": "yerwar"},
+        )
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertIn("TAXONOMIC_AMBIGUITY", codes)
+
+    async def test_single_form_conforms_with_no_ambiguity_caveat(self):
+        result = await _run(
+            "get_taxonomy_forms", ["amerob"], {"speciesCode": "amerob"}
+        )
+        _validate(TAXONOMY_FORMS_SCHEMA, result.structured_content)
+        codes = {c["code"] for c in result.structured_content["caveats"]}
+        self.assertNotIn("TAXONOMIC_AMBIGUITY", codes)
+
+    async def test_no_forms_still_emits_structured_content(self):
+        result = await _run(
+            "get_taxonomy_forms", [], {"speciesCode": "amerob"}
+        )
+        self.assertIsNotNone(result.structured_content)
+        _validate(TAXONOMY_FORMS_SCHEMA, result.structured_content)
+        self.assertEqual(result.structured_content["rows"], [])
+
+
 class ToolsListWiringTests(unittest.TestCase):
     def test_output_schema_emitted_in_tools_list(self):
         from core.plugin_manager import PluginManager
@@ -548,15 +744,52 @@ class ToolsListWiringTests(unittest.TestCase):
             "outputSchema", emitted["ebird__get_recent_observations"]
         )
 
+    def test_every_ebird_tool_declares_a_schema(self):
+        """All ten are converted; none is left returning bare prose."""
+        tools = EBirdPlugin({"enabled": True, "api_key": "k"}).get_tools()
+        missing = [t.name for t in tools if not t.output_schema]
+        self.assertEqual(missing, [], f"no outputSchema on: {missing}")
+
     def test_tools_without_a_schema_omit_the_field(self):
+        """The plumbing must stay opt-in for other plugins.
+
+        No eBird tool exercises this any more — all ten declare a schema —
+        so it is checked against a synthetic plugin rather than deleted.
+        A tool that declares nothing must emit no `outputSchema` key at
+        all, not `outputSchema: null`.
+        """
+        from core.interfaces import MCPPlugin, PluginType, ToolDefinition
         from core.plugin_manager import PluginManager
 
+        class _Bare(MCPPlugin):
+            plugin_name = "bare"
+            plugin_type = PluginType.CUSTOM_API
+
+            async def initialize(self):
+                return True
+
+            async def shutdown(self):
+                return None
+
+            async def health_check(self):
+                return True
+
+            def get_tools(self):
+                return [
+                    ToolDefinition(
+                        name="plain",
+                        description="",
+                        input_schema={"type": "object"},
+                    )
+                ]
+
+            async def execute_tool(self, tool_name, arguments):
+                return None
+
         manager = PluginManager({})
-        manager.plugins = {
-            "ebird": EBirdPlugin({"enabled": True, "api_key": "k"})
-        }
+        manager.plugins = {"bare": _Bare({})}
         emitted = {t["name"]: t for t in manager.get_all_tools()}
-        self.assertNotIn("outputSchema", emitted["ebird__get_taxonomy"])
+        self.assertNotIn("outputSchema", emitted["bare__plain"])
 
 
 if __name__ == "__main__":

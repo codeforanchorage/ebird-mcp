@@ -27,8 +27,10 @@ from typing import Any, Dict
 CAVEAT_ABSENCE_OF_EVIDENCE = "ABSENCE_OF_EVIDENCE"
 CAVEAT_COUNT_NOT_REPORTED = "COUNT_NOT_REPORTED"
 CAVEAT_LOW_SURVEY_EFFORT = "LOW_SURVEY_EFFORT"
+CAVEAT_NON_SPECIES_TAXA = "NON_SPECIES_TAXA"
 CAVEAT_NOTABLE_IS_LOCAL = "NOTABLE_IS_LOCAL"
 CAVEAT_ONE_RECORD_PER_SPECIES = "ONE_RECORD_PER_SPECIES"
+CAVEAT_ROWS_TRUNCATED = "ROWS_TRUNCATED"
 CAVEAT_POSSIBLY_TRUNCATED = "POSSIBLY_TRUNCATED"
 CAVEAT_RESPONSE_SIZE_CEILING = "RESPONSE_SIZE_CEILING"
 CAVEAT_SINGLE_OBSERVER = "SINGLE_OBSERVER_PROVENANCE"
@@ -43,8 +45,10 @@ ALL_CAVEAT_CODES = frozenset(
         CAVEAT_ABSENCE_OF_EVIDENCE,
         CAVEAT_COUNT_NOT_REPORTED,
         CAVEAT_LOW_SURVEY_EFFORT,
+        CAVEAT_NON_SPECIES_TAXA,
         CAVEAT_NOTABLE_IS_LOCAL,
         CAVEAT_ONE_RECORD_PER_SPECIES,
+        CAVEAT_ROWS_TRUNCATED,
         CAVEAT_POSSIBLY_TRUNCATED,
         CAVEAT_RESPONSE_SIZE_CEILING,
         CAVEAT_SINGLE_OBSERVER,
@@ -377,4 +381,115 @@ HOTSPOTS_SCHEMA = _envelope(
             }
         }
     ),
+)
+
+
+# ---- Taxonomy rows --------------------------------------------------------
+
+# Only the fields a caller can act on. eBird's taxonomy entries also carry
+# taxonOrder, familyCode, comNameCodes and sciNameCodes; those are internal
+# ordering keys and search indices, and taxonOrder in particular is renumbered
+# with each annual taxonomy release. Exposing them in a machine-readable
+# channel would invite exactly the use they cannot support -- a field invites
+# use -- so they are left out rather than shipped "because they exist".
+_TAXONOMY_ROW = {
+    "type": "object",
+    "properties": {
+        "speciesCode": {
+            "type": ["string", "null"],
+            "description": (
+                "The canonical identifier to pass to the species-specific "
+                "observation tools. This is the reason to call this tool."
+            ),
+        },
+        "comName": {
+            "type": ["string", "null"],
+            "description": "Common name in the requested locale.",
+        },
+        "sciName": {
+            "type": ["string", "null"],
+            "description": "Scientific name.",
+        },
+        "category": {
+            "type": ["string", "null"],
+            "description": (
+                "eBird taxonomic category: species, issf (subspecies), "
+                "hybrid, slash, spuh, domestic, form. ONLY 'species' rows "
+                "count toward a species total — a hybrid or a 'spuh' is an "
+                "observation the observer could not resolve to one species."
+            ),
+        },
+        "order": {
+            "type": ["string", "null"],
+            "description": "Taxonomic order.",
+        },
+        "familyComName": {
+            "type": ["string", "null"],
+            "description": "Family common name.",
+        },
+        "familySciName": {
+            "type": ["string", "null"],
+            "description": "Family scientific name.",
+        },
+        "bandingCodes": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "4-letter banding alpha codes (AMRO), included precisely "
+                "because they are NOT interchangeable with speciesCode. "
+                "Never pass one of these where a speciesCode is wanted."
+            ),
+        },
+    },
+}
+
+TAXONOMY_SCHEMA = _envelope(
+    rows={
+        "type": "array",
+        "description": (
+            "Taxonomy entries matching the requested category. May be a "
+            "truncated prefix of the full set — check summary.truncated and "
+            "summary.total_count rather than assuming completeness."
+        ),
+        "items": _TAXONOMY_ROW,
+    },
+    summary=_summary(
+        {
+            "categories": {
+                "type": "object",
+                "description": (
+                    "Row count per eBird taxonomic category present in "
+                    "`rows`. Caller-independent key set, but the keys are "
+                    "eBird's category values, so this is an open object."
+                ),
+                "additionalProperties": {"type": "integer", "minimum": 0},
+            }
+        }
+    ),
+)
+
+
+_TAXONOMY_FORM_ROW = {
+    "type": "object",
+    "properties": {
+        "speciesCode": {
+            "type": ["string", "null"],
+            "description": (
+                "A form code observers may have logged sightings under. "
+                "Query each separately before aggregating counts."
+            ),
+        }
+    },
+}
+
+TAXONOMY_FORMS_SCHEMA = _envelope(
+    rows={
+        "type": "array",
+        "description": (
+            "One row per recognized form code, including the base species. "
+            "Always complete: this endpoint returns a handful of codes."
+        ),
+        "items": _TAXONOMY_FORM_ROW,
+    },
+    summary=_summary(),
 )
