@@ -963,6 +963,20 @@ def _parse_ebird_datetime(value: Any) -> Optional[dt.datetime]:
 
 
 def _days_ago(value: Any) -> Optional[int]:
+    """Days between an eBird timestamp and now. Accurate to +/- 1 day.
+
+    eBird reports observation times in the LOCAL time of the observation
+    and carries no timezone offset, so this compares a local date against
+    a UTC one. Near midnight, or for an observer far from UTC (Alaska is
+    UTC-8/-9 — most of this deployment's traffic), the result can be off
+    by a day in either direction.
+
+    Not corrected, because correcting it would mean inferring a timezone
+    from lat/lng and presenting a guess as precision. One day of slack
+    does not change what this value is used for — ranking hotspots by
+    recency and flagging a stale search window — and both callers of it
+    are documented as approximate rather than silently exact.
+    """
     parsed = _parse_ebird_datetime(value)
     if parsed is None:
         return None
@@ -1633,8 +1647,10 @@ def _format_observations(
     query_lat = arguments.get("lat") if tool_name in _NEARBY_OBSERVATION_TOOLS else None
     query_lng = arguments.get("lng") if tool_name in _NEARBY_OBSERVATION_TOOLS else None
 
+    grain = _grain_summary(observations)
+
     if len(observations) > _COMPACT_FORMAT_THRESHOLD:
-        return _format_observations_compact(
+        return grain + _format_observations_compact(
             observations,
             include_observer=include_observer,
             query_lat=query_lat,
@@ -1650,7 +1666,42 @@ def _format_observations(
         )
         for obs in observations
     ]
-    return _join_with_size_cap(blocks, sep="\n\n")
+    return grain + _join_with_size_cap(blocks, sep="\n\n")
+
+
+def _grain_summary(observations: List[Dict[str, Any]]) -> str:
+    """Lead with the counts, because "how many" has four answers here.
+
+    A reader (or a model) asked "how many X" will count what is in front
+    of it. Rows are observations, not species, not checklists, not places
+    — and a region pull that reports one species twice makes a row count
+    an overcount of species. Stating all four up front, and naming the
+    discrepancy explicitly when they diverge, is cheaper than correcting
+    the conclusion afterwards. Mirrors summary.* in structuredContent.
+    """
+    rows = len(observations)
+    species = len({o.get("speciesCode") for o in observations if o.get("speciesCode")})
+    checklists = _unique_subIds(observations)
+    locations = len({o.get("locId") for o in observations if o.get("locId")})
+
+    line = (
+        f"{rows} observation{'s' if rows != 1 else ''} · "
+        f"{species} species · {checklists} checklist"
+        f"{'s' if checklists != 1 else ''} · {locations} location"
+        f"{'s' if locations != 1 else ''}"
+    )
+    if species and species != rows:
+        direction = "over" if rows > species else "under"
+        subject = (
+            f"is {species} distinct species"
+            if species == 1
+            else f"are {species} distinct species"
+        )
+        line += (
+            f"\nCounting rows would {direction}state the species total — "
+            f"there {subject} across these {rows} records."
+        )
+    return line + "\n\n"
 
 
 def _format_obs_block(
@@ -1910,6 +1961,37 @@ def _format_observations_compact(
     return "\n".join(header) + "\n" + _join_with_size_cap(rows, sep="\n")
 
 
+def _narrowing_filters(arguments: Dict[str, Any]) -> List[str]:
+    """Caller-applied filters that can manufacture a zero-record result.
+
+    A zero produced by `hotspot=true` is a different claim from a zero
+    over the whole region, and `includeProvisional=false` is stronger than
+    it looks: MOST eBird records are never explicitly reviewed, so
+    excluding unreviewed reports can empty an otherwise-populated result.
+    The request already carries this diagnostic; not reporting it lets a
+    filtered zero read as an absolute one.
+    """
+    applied: List[str] = []
+    if arguments.get("hotspot") is True:
+        applied.append(
+            "hotspot=true — only observations at designated hotspots were "
+            "considered; sightings logged at personal locations were excluded"
+        )
+    if arguments.get("includeProvisional") is False:
+        applied.append(
+            "includeProvisional=false — unreviewed reports were excluded, "
+            "and MOST eBird records are never explicitly reviewed, so this "
+            "removes far more than it sounds like it does"
+        )
+    dist = arguments.get("dist")
+    if isinstance(dist, int) and dist <= 5:
+        applied.append(
+            f"dist={dist} km — a tight radius; birding effort clusters at "
+            f"hotspots that may sit just outside it"
+        )
+    return applied
+
+
 def _empty_observation_body(tool_name: str, arguments: Dict[str, Any]) -> str:
     """Body text for an empty observation result. Frames absence as
     sampling, not biology — eBird is opt-in, so 'no records' usually means
@@ -1919,6 +2001,16 @@ def _empty_observation_body(tool_name: str, arguments: Dict[str, Any]) -> str:
     region = arguments.get("regionCode")
     back = arguments.get("back")
     window = f"the last {back} days" if isinstance(back, int) else "the requested window"
+
+    filters = _narrowing_filters(arguments)
+    filter_note = ""
+    if filters:
+        joined = "".join(f"\n  - {f}" for f in filters)
+        filter_note = (
+            f"\n\nNOTE — this query was NARROWED by filters you supplied, "
+            f"any of which can produce an empty result on its own:{joined}\n"
+            f"Re-run without them before concluding anything about absence."
+        )
 
     if tool_name in _SPECIES_SPECIFIC_TOOLS:
         target = f"'{species}'" if species else "this species"
@@ -1932,6 +2024,7 @@ def _empty_observation_body(tool_name: str, arguments: Dict[str, Any]) -> str:
             f"back, increasing dist (for nearby queries), checking "
             f"get_taxonomy_forms for related subspecies codes, or checking "
             f"get_hotspots for active birding locations nearby."
+            + filter_note
         )
 
     where = f"in '{region}'" if region else "near the query point"
@@ -1942,6 +2035,7 @@ def _empty_observation_body(tool_name: str, arguments: Dict[str, Any]) -> str:
         f"opt-in observation logs, not a systematic survey. Try expanding "
         f"back, increasing dist, or checking get_hotspots / "
         f"get_nearby_hotspots for active birding locations."
+        + filter_note
     )
 
 
@@ -1970,6 +2064,10 @@ def _format_hotspots(
 
     query_lat = arguments.get("lat") if nearby else None
     query_lng = arguments.get("lng") if nearby else None
+
+    degenerate = _degenerate_hotspot_body(hotspots)
+    if degenerate:
+        return degenerate
 
     if len(hotspots) > _COMPACT_FORMAT_THRESHOLD:
         return _format_hotspots_compact(
@@ -2033,6 +2131,58 @@ def _format_hotspots(
         blocks.append("\n".join(lines))
 
     return _join_with_size_cap(blocks, sep="\n\n")
+
+
+def _degenerate_hotspot_body(hotspots: List[Dict[str, Any]]) -> Optional[str]:
+    """Summarise instead of rendering a whole page of empty cells.
+
+    ``get_nearby_hotspots`` falls back to parsing eBird's CSV form when the
+    JSON request fails, and ``_parse_hotspot_text`` can only reliably
+    recover locId / locName / lat / lng from it. Every row then has no
+    species total and no observation date, so the compact table becomes
+    hundreds of lines of "unknown | none (inactive)".
+
+    Deliberately does NOT claim which cause it is. From the data alone a
+    missing column and a genuinely dormant hotspot are indistinguishable,
+    and asserting the wrong one would be its own false finding — the exact
+    mistake this is meant to prevent, inverted. It says what is verifiable
+    (no activity data is present for any row), says both readings are
+    open, and names the call that settles it.
+
+    Only applies above the compact-table threshold. One or two rows with
+    empty cells is not a page of them, and the block format's explicit
+    "no records (inactive hotspot)" per row reads fine at that size.
+    """
+    if len(hotspots) <= _COMPACT_FORMAT_THRESHOLD:
+        return None
+    if any(
+        h.get("numSpeciesAllTime") is not None or h.get("latestObsDt")
+        for h in hotspots
+    ):
+        return None
+
+    listed = "\n".join(
+        f"- {h.get('locName') or 'unnamed'} ({h.get('locId', '?')})"
+        for h in hotspots[:_COMPACT_FORMAT_THRESHOLD]
+    )
+    more = (
+        f"\n… and {len(hotspots) - _COMPACT_FORMAT_THRESHOLD} more "
+        f"(all of them in this response's structuredContent)"
+        if len(hotspots) > _COMPACT_FORMAT_THRESHOLD
+        else ""
+    )
+    return (
+        f"{len(hotspots)} hotspots — IDs and names only.\n\n"
+        f"⚠️ NO ACTIVITY DATA: not one of these rows carries a species "
+        f"total or an observation date. Two different things look like "
+        f"this and this response cannot tell them apart: eBird's hotspot "
+        f"endpoint may have fallen back to its CSV form, which omits those "
+        f"columns, or these hotspots may genuinely have no recorded "
+        f"observations. Do NOT report them as dormant on this evidence. "
+        f"Call get_recent_observations with a locId as regionCode to "
+        f"settle it.\n\n"
+        f"{listed}{more}"
+    )
 
 
 def _format_hotspots_compact(
