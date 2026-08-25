@@ -24,9 +24,22 @@ bash ./scripts/test_streamable_http.sh https://your-endpoint/mcp
 bash ./scripts/setup-backend.sh               # one-time per AWS account
 bash ./scripts/deploy.sh --environment staging
 bash ./scripts/deploy.sh --environment prod
+
+# Verify a deployed endpoint (staging or prod)
+python scripts/smoke_prod.py                  # defaults to prod
+python scripts/smoke_prod.py https://<staging-host>/staging/mcp
 ```
 
-Tests: `python -m unittest discover tests` — plain unittest, no network (upstream calls are stubbed). `tests/test_civic_ai_patterns.py` pins the caveat/formatting behavior; `tests/test_input_validation.py` pins the path-traversal rejection (regionCode/speciesCode flow into upstream URL paths) and the numeric clamps. No linter or formatter wired up — `pyproject.toml` only declares metadata.
+Tests: `python -m unittest discover tests` — plain unittest, no network (upstream calls are stubbed). Also runnable under pytest, which additionally applies the `tests/conftest.py` global-state fixture to every test.
+
+- `test_civic_ai_patterns.py` — caveat precedence and text formatting.
+- `test_input_validation.py` — path-traversal rejection (`regionCode`/`speciesCode` flow into upstream URL paths) and numeric clamps.
+- `test_mcp_server.py` — JSON-RPC dispatch, protocol negotiation, caller-vs-fault error classification.
+- `test_caller_error_logging.py` — WARNING-without-traceback for caller mistakes; an AST sweep keeps numeric coercion of caller args inside `_clamp_int`/`_coerce_float`.
+- `test_structured_output.py` — validates REAL tool output against the declared schemas with `jsonschema`, on every awkward branch (zero rows, null `howMany`, cap hit, sparse rows, unparseable dates, clipped text).
+- `test_tool_metadata.py`, `test_transport_parity.py`, `test_domain_correctness.py`, `test_config_invariants.py` — title/schema maps, the six transport cases local must match prod on, false-zero/grain checks, and the timeout ladder.
+
+Lint: `python -m ruff check .` — must be clean. Do NOT run `ruff format`; this repo is hand-wrapped at ~79 cols and a format pass produces a thousand-line diff. `jsonschema` is a dev-only dependency (`pyproject.toml` `[project.optional-dependencies].dev`) and is never imported by the Lambda.
 
 The deploy script handles packaging: it builds `.deploy/` with `pip install --platform manylinux2014_x86_64 --python-version 3.11 --only-binary :all:` (or `uv` if present), zips to `lambda-deployment.zip`, and copies that plus `config.yaml` into `terraform/aws/` where Terraform reads them.
 
@@ -68,9 +81,20 @@ Key design points future Claude should know before editing:
 - **Per-invocation plugin shutdown on Lambda.** `server/adapters/aws_lambda.py::_run_with_cleanup` calls `plugin_manager.shutdown()` after every request to avoid `"Event loop is closed"` errors from `httpx` when the Lambda execution context is reused. Each warm invocation re-initializes the eBird client. If cold-starts ever become a real problem, move the client to module scope and remove the shutdown — but understand the httpx/asyncio interaction first.
 - **Adapter responsibilities split.** `aws_lambda.py` handles event shape (API GW v1, v2, Function URL), base64 bodies, the 64 KB body cap, and OPTIONS preflight. Everything below it (CORS allowlist, JSON-RPC, plugin dispatch) is cloud-agnostic and lives in `server/http_handler.py` and `core/`.
 - **Hardening in the eBird plugin.** `plugins/ebird/plugin.py::_clamp_and_validate` enforces regex-validated `regionCode`/`speciesCode`/`locale` (path-injection defense), clamps numeric args (`back`, `maxResults`, `dist`, `lat`/`lng`) silently into accepted ranges, and rejects unknown `cat`/`fmt` values. Retries (`_RETRY`) are limited to two attempts on transport/read-timeout errors only — 4xx/5xx flow straight through.
-- **Response-size controls.** `maxResults` is capped at 1000 (`_MAX_RESULTS_CEILING` — deliberately below eBird's own 10000, which would render to 3+ MB of text). Observation/hotspot results above 20 records (`_COMPACT_FORMAT_THRESHOLD`) render as a compact pipe-delimited table instead of the verbose block format; small results keep the blocks. A 200 KB byte ceiling (`_MAX_BODY_BYTES`, via `_join_with_size_cap`) backstops the formatted body independent of record count, truncating at a record boundary with an explicit `RESPONSE SIZE CEILING` notice — never silently.
 - **Bundled taxonomy.** `scripts/refresh_taxonomy.py` fetches the full eBird taxonomy (every `cat`) once at deploy time and writes it to `plugins/ebird/data/taxonomy.json` (gitignored). `ebird_client.py::get_taxonomy` serves the common case (`locale=en`, `fmt=json`) from that bundle via a module-level lazy cache, filtering by `cat` in-process. Non-English locales and `fmt=csv` fall through to the live API. The bundle is the single biggest eBird-quota saver — taxonomy lookups would otherwise be a per-conversation drain against the 1000/day cap. If the file is missing the plugin transparently falls back to live calls, so a refresh failure during deploy is non-fatal.
-- **Error responses are scrubbed.** `core/mcp_server.py::handle_request` mints a UUID `error_id`, logs the full exception to CloudWatch under that ID, and returns only `{"code": -32603, "message": "Internal error", "data": "Error ID: ..."}` to the client. Do not regress this by surfacing `str(e)` in responses.
+- **Error responses are scrubbed — but only genuine faults.** `core/mcp_server.py::handle_request` classifies every exception through the `_CALLER_ERRORS` mapping. A genuine fault mints a UUID `error_id`, logs the full exception to CloudWatch under that ID, and returns only `{"code": -32603, "message": "Internal error", "data": "Error ID: ..."}`; do not regress that by surfacing `str(e)`. A *caller* error is the opposite: it gets its own JSON-RPC code, an actionable `data` payload (there is nothing sensitive in "you named a tool that does not exist"), a WARNING-level log and no traceback. Add the next caller-error code as a row in that mapping, not another nested conditional.
+  - `UnknownToolError` → -32602 `Unknown tool: <name>`, with the available-tool list in `data`.
+  - `InvalidToolParamsError` → -32602 `Invalid params`, for a missing `name` or non-object `arguments`. This is checked *before* dispatch, so a plugin can never be handed a shape it cannot process.
+  - `ToolInputError` (raised in the plugin) → a tool error with a readable message, logged at WARNING. **Never infer caller-ness from `ValueError`** — `json.JSONDecodeError` subclasses it, so a malformed upstream payload would be misfiled and lose its traceback.
+- **Tool metadata.** Every tool carries a top-level `title` (from `TOOL_TITLES`) and an `outputSchema` (from `TOOL_OUTPUT_SCHEMAS`), both emitted by `PluginManager.get_all_tools`. Both maps are pinned in *both* directions by `tests/test_tool_metadata.py`, so adding or removing a tool without updating them fails. `idempotentHint` is deliberately absent — the schema says it is meaningful only when `readOnlyHint == false`, and every tool here is read-only.
+- **Structured output.** All ten tools return `structuredContent` alongside the human-readable text, in a shared `query` / `summary` / `rows` / `caveats` envelope declared in `plugins/ebird/schemas.py`. Things to know before editing:
+  - **A declared `outputSchema` is binding** — the spec says servers MUST conform and clients SHOULD validate. Never declare a constraint real data can violate; there is no `maximum` anywhere and no `required` on a field eBird can omit, and a test sweeps for both.
+  - **`_build_structured` derives from the RAW upstream `data`, in `execute_tool`** — deliberately not from inside the text formatters, which short-circuit on empty results. A builder behind those early returns is exactly how a server advertises a schema and then returns nothing on the zero-result path. Keep it that way.
+  - **Caveats come from ONE list.** `_build_caveats` returns coded objects; `_finalize_response` renders their `message` into the text and `_build_structured` emits `{code, message}`. Codes are stable API — reword a message freely, never a code. `_in_body=True` marks a caveat the body already renders (the absence-of-evidence framing) so it is not printed twice.
+  - **`total_count` is null only when genuinely unknown** (the result hit the `maxResults` cap). 0 means "known, and none". Conflating them makes a complete answer look unmeasured.
+  - **`howMany` null means PRESENT, COUNT NOT REPORTED**, not zero — eBird's "X". The most misreadable field in this API; it carries a schema note, a `COUNT_NOT_REPORTED` caveat and a `summary.counts_not_reported` tally.
+  - **Rows ship complete**, even when the text is compacted or clipped at the byte backstop. The one exception is `get_taxonomy`, capped at `_MAX_STRUCTURED_TAXONOMY_ROWS` because the full set is 2.5–6 MB against Lambda's 6 MB response limit; it reports the true `total_count`, `truncated: true` and a `ROWS_TRUNCATED` caveat.
+- **Response-size controls apply to the TEXT only.** `maxResults` is capped at 1000 (`_MAX_RESULTS_CEILING` — deliberately below eBird's own 10000). Observation/hotspot results above 20 records (`_COMPACT_FORMAT_THRESHOLD`) render as a compact pipe-delimited table; small results keep the blocks. A 200 KB byte ceiling (`_MAX_BODY_BYTES`, via `_join_with_size_cap`) backstops the formatted body, truncating at a record boundary with an explicit notice and a `RESPONSE_SIZE_CEILING` caveat — never silently. `structuredContent` is unaffected by all of it.
 
 ## Files that matter
 
@@ -79,8 +103,11 @@ Key design points future Claude should know before editing:
 - `core/validators.py` — one-plugin rule; config loading.
 - `server/http_handler.py` — `ALLOWED_ORIGINS` CORS allowlist; config env-var loader.
 - `server/adapters/aws_lambda.py` — Lambda entry point; body size cap; per-invocation cleanup.
-- `plugins/ebird/plugin.py` — tool catalog (`get_tools`) + dispatch (`execute_tool`); hardening helpers.
+- `plugins/ebird/plugin.py` — tool catalog (`get_tools`) + dispatch (`execute_tool`); hardening helpers; caveat builder and structured-output builder.
+- `plugins/ebird/schemas.py` — the declared `outputSchema`s and the stable caveat codes. Codes are API; messages are not.
+- `core/interfaces.py` — `ToolDefinition` (`title`, `output_schema`), `ToolResult` (`structured_content`), and the caller-error exception types.
 - `plugins/ebird/ebird_client.py` — thin httpx wrapper over eBird v2. Watch the endpoint paths: eBird is inconsistent — taxonomy lives under `/ref/taxonomy/ebird` but taxonomic *forms* live under `/ref/taxon/forms/{speciesCode}` (`taxon`, not `taxonomy`). The wrong path 404s for every species; don't "correct" `taxon` back to `taxonomy`. Also: `get_taxonomy` serves from `plugins/ebird/data/taxonomy.json` (the deploy-time bundle) when feasible; see the bundled-taxonomy bullet above.
+- `scripts/smoke_prod.py` — capability-level smoke test against a deployed endpoint; takes a base URL so it runs against staging too. Asserts invariants, never volatile eBird data. Budget ~20 requests against prod's 50-per-5-min WAF rule.
 - `scripts/refresh_taxonomy.py` — fetches the full eBird taxonomy and writes the bundle. Run automatically by `scripts/deploy.sh` (Step 1.5). Can also be run manually for local dev: `python scripts/refresh_taxonomy.py`.
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
