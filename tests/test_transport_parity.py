@@ -12,13 +12,15 @@ These tests drive the SAME handler both entry points use, so a regression
 in any of the six cases fails here rather than in production. The case
 table mirrors the one verified by hand against local and prod:
 
-    case                              expected
-    ping, no Origin                   200
-    Origin https://claude.ai          200
-    Origin https://evil.example       403
-    MCP-Protocol-Version 2026-07-28   400
-    MCP-Protocol-Version 2025-11-25   200
-    GET /mcp                          405
+    case                                          expected
+    ping, no Origin                               200
+    Origin https://claude.ai                      200
+    Origin https://evil.example                   403
+    MCP-Protocol-Version 2026-07-28, legacy body  400 (-32020)
+    MCP-Protocol-Version 2026-07-28, modern body  200
+    MCP-Protocol-Version 1999-01-01               400 (-32022)
+    MCP-Protocol-Version 2025-11-25               200
+    GET /mcp                                      405
 
 Run with::
 
@@ -131,33 +133,115 @@ class OriginAllowlistTests(_TransportCase):
         )
 
 
+MODERN_DISCOVER = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "server/discover",
+        "params": {
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }
+        },
+    }
+)
+
+
 class ProtocolVersionHeaderTests(_TransportCase):
     async def test_supported_version_passes(self):
         status, _, _ = await self.post({"mcp-protocol-version": "2025-11-25"})
         self.assertEqual(status, 200)
 
-    async def test_every_supported_version_passes(self):
-        for version in MCPServer.SUPPORTED_PROTOCOL_VERSIONS:
+    async def test_every_legacy_version_passes(self):
+        for version in MCPServer.LEGACY_PROTOCOL_VERSIONS:
             with self.subTest(version=version):
                 status, _, _ = await self.post(
                     {"mcp-protocol-version": version}
                 )
                 self.assertEqual(status, 200)
 
-    async def test_2026_07_28_is_refused_with_400(self):
-        """Deliberately 400/-32600, not 2026-07-28's -32022.
+    async def test_modern_version_with_modern_body_is_served(self):
+        """2026-07-28 is served (dual-era), not bounced to the 400 that
+        used to cost every claude.ai / Claude Code session a fallback
+        round trip. Header, body and Mcp-Method all agree here."""
+        status, headers, body = await self.post(
+            {
+                "mcp-protocol-version": "2026-07-28",
+                "mcp-method": "server/discover",
+                "mcp-session-id": "stale-legacy-session",
+            },
+            body=MODERN_DISCOVER,
+        )
+        self.assertEqual(status, 200)
+        result = json.loads(body)["result"]
+        self.assertEqual(result["supportedVersions"][0], "2026-07-28")
+        # No session in the modern era: nothing minted, nothing echoed.
+        self.assertNotIn("Mcp-Session-Id", headers)
 
-        A dual-era client reading a -32022 UnsupportedProtocolVersionError
-        would retry the new handshake; reading a plain 400 it falls back
-        to initialize and talks to us as the legacy server we are.
-        """
+    async def test_modern_version_with_legacy_body_is_header_mismatch(self):
+        """The half-migrated case: header says 2026-07-28, body carries no
+        _meta. Still a 400 (so the old case table holds), but now the
+        modern -32020 naming the disagreeing header -- it is rejected as
+        a modern request, not silently served as legacy."""
         status, _, body = await self.post(
             {"mcp-protocol-version": "2026-07-28"}
         )
         self.assertEqual(status, 400)
-        error = json.loads(body)["error"]
-        self.assertEqual(error["code"], -32600)
-        self.assertNotEqual(error["code"], -32022)
+        self.assertEqual(json.loads(body)["error"]["code"], -32020)
+
+    async def test_unknown_version_is_refused_with_32022(self):
+        """A revision we implement in neither era: 400 with the modern
+        UnsupportedProtocolVersionError listing every version we do
+        serve, so the client can retry with one. (Used to be -32600, when
+        a plain 400 was what made dual-era clients fall back to
+        initialize; we are dual-era now, so that fallback would cost a
+        round trip for nothing.)"""
+        status, _, body = await self.post(
+            {"mcp-protocol-version": "1999-01-01"}
+        )
+        self.assertEqual(status, 400)
+        parsed = json.loads(body)
+        error = parsed["error"]
+        self.assertEqual(error["code"], -32022)
+        self.assertEqual(error["data"]["requested"], "1999-01-01")
+        self.assertEqual(error["data"]["supported"][0], "2026-07-28")
+        self.assertIn("2025-11-25", error["data"]["supported"])
+        # The spec's own UnsupportedProtocolVersionError example echoes
+        # the request id; a client with several requests in flight needs
+        # it to know which one was refused. This used to be null.
+        self.assertEqual(parsed["id"], 1)
+
+    async def test_unknown_version_without_an_id_keeps_null_id(self):
+        """A notification (no id) or an unparseable body cannot be
+        correlated, so the error keeps a null id rather than inventing
+        one."""
+        for label, body in (
+            (
+                "notification",
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            ),
+            ("unparseable", "{not json"),
+            ("non-object", "[1, 2]"),
+        ):
+            with self.subTest(body=label):
+                status, _, out = await self.post(
+                    {"mcp-protocol-version": "1999-01-01"}, body=body
+                )
+                self.assertEqual(status, 400)
+                parsed = json.loads(out)
+                self.assertIsNone(parsed["id"])
+                self.assertEqual(parsed["error"]["code"], -32022)
+
+    async def test_origin_and_path_errors_keep_null_id(self):
+        """Those happen before any body can be trusted; the spec says
+        they MAY have no id, and we do not go looking for one."""
+        status, _, body = await self.post({"origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+        self.assertIsNone(json.loads(body)["id"])
+        status, _, body = await self.post(path="/nope")
+        self.assertEqual(status, 404)
+        self.assertIsNone(json.loads(body)["id"])
 
     async def test_absent_header_is_fine(self):
         """Older clients omit it; the spec says assume 2025-03-26."""
@@ -205,6 +289,14 @@ class CorsPreflightTests(_TransportCase):
         self.assertIn(
             "mcp-session-id", headers["Access-Control-Allow-Headers"]
         )
+
+    async def test_preflight_allows_the_modern_mirror_headers(self):
+        """2026-07-28 clients send Mcp-Method on every request and
+        Mcp-Name on tools/call; a browser preflight must allow both."""
+        _, headers, _ = self.handler.handle_options(request_id="test")
+        allowed = headers["Access-Control-Allow-Headers"]
+        self.assertIn("mcp-method", allowed)
+        self.assertIn("mcp-name", allowed)
 
 
 class SessionHeaderTests(_TransportCase):

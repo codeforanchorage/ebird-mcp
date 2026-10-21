@@ -15,7 +15,7 @@ from core.logging_utils import (
     format_request_log,
     format_response_log,
 )
-from core.mcp_server import MCPServer
+from core.mcp_server import ERA_MODERN, MCPServer
 from core.plugin_manager import PluginManager
 from core.validators import (
     ConfigurationError,
@@ -128,10 +128,12 @@ class UniversalHTTPHandler:
             "Vary": "Origin",
             "Access-Control-Allow-Methods": "POST, OPTIONS",
             # mcp-protocol-version: sent on every request by clients speaking
-            # protocol revision 2025-06-18+; must be allowed or browser
-            # preflights fail.
+            # protocol revision 2025-06-18+; mcp-method / mcp-name: the
+            # 2026-07-28 Streamable HTTP mirror headers. All must be allowed
+            # or browser preflights fail.
             "Access-Control-Allow-Headers": (
-                "content-type, accept, mcp-session-id, mcp-protocol-version"
+                "content-type, accept, mcp-session-id, mcp-protocol-version, "
+                "mcp-method, mcp-name"
             ),
             "Access-Control-Expose-Headers": "x-request-id, mcp-session-id",
         }
@@ -184,10 +186,43 @@ class UniversalHTTPHandler:
             error_headers.update(self._get_cors_headers(request_origin))
             return (403, error_headers, error_body)
 
+        # Pre-parse JSON once, up front: to echo the JSON-RPC id on the
+        # transport-level version error below (the spec's own
+        # UnsupportedProtocolVersionError example carries the request's id,
+        # and a client correlating several in-flight requests needs it to
+        # know which one was refused), to detect initialize (mint a session
+        # ID), and to classify the era. The core parses the body again so a
+        # malformed body still gets its -32700 there; the body is small and
+        # the isolation is worth the second parse. A notification (no id)
+        # or an unparseable body cannot be correlated, so the id stays
+        # null rather than being invented.
+        body_request_id = None
+        try:
+            request_json = json.loads(body)
+            body_request_id = request_json.get("id")
+            is_initialize = request_json.get("method") == "initialize"
+            is_modern = (
+                MCPServer.request_era(request_json, headers) == ERA_MODERN
+            )
+        except (json.JSONDecodeError, AttributeError):
+            is_initialize = False
+            is_modern = False
+
         # Spec (Streamable HTTP): a request carrying an invalid or
         # unsupported MCP-Protocol-Version header MUST get 400 Bad Request.
-        # An absent header is fine (assume 2025-03-26 per spec; this server
-        # behaves identically across revisions).
+        # An absent header is fine (assume 2025-03-26 per spec). Both
+        # legacy (2025-11-25 and earlier, initialize handshake) and modern
+        # (2026-07-28+, per-request _meta) revisions pass through -- see
+        # core/mcp_server.py for the split; the modern era's header/body
+        # consistency checks happen there, once the body has been parsed.
+        #
+        # A version we implement in neither era gets the modern
+        # UnsupportedProtocolVersionError (-32022) listing what we do
+        # support: a modern client retries with one of those, and a legacy
+        # client at least sees a version it can ask for on initialize.
+        # (This used to be a bare -32600 on purpose, so that dual-era
+        # clients would fall back to initialize; now that we are dual-era
+        # ourselves that fallback would cost them a round trip for nothing.)
         protocol_version_header = headers.get("mcp-protocol-version")
         if (
             protocol_version_header
@@ -207,15 +242,16 @@ class UniversalHTTPHandler:
             error_body = json.dumps(
                 {
                     "jsonrpc": "2.0",
-                    "id": None,
+                    "id": body_request_id,
                     "error": {
-                        "code": -32600,
-                        "message": "Bad Request",
-                        "data": (
-                            f"Unsupported MCP-Protocol-Version: "
-                            f"{protocol_version_header}. Supported: "
-                            f"{', '.join(MCPServer.SUPPORTED_PROTOCOL_VERSIONS)}"
-                        ),
+                        "code": -32022,
+                        "message": "Unsupported protocol version",
+                        "data": {
+                            "supported": list(
+                                MCPServer.SUPPORTED_PROTOCOL_VERSIONS
+                            ),
+                            "requested": protocol_version_header,
+                        },
                     },
                 }
             )
@@ -275,13 +311,6 @@ class UniversalHTTPHandler:
             error_headers.update(self._get_cors_headers(request_origin))
             return (405, error_headers, error_body)
 
-        # Pre-parse JSON only to detect initialize and mint a session ID.
-        try:
-            request_json = json.loads(body)
-            is_initialize = request_json.get("method") == "initialize"
-        except (json.JSONDecodeError, AttributeError):
-            is_initialize = False
-
         session_id = None
         if is_initialize:
             session_id = str(uuid.uuid4())
@@ -290,7 +319,12 @@ class UniversalHTTPHandler:
                 extra={"request_id": request_id, "mcp_session_id": session_id},
             )
 
-        effective_session_id = session_id or incoming_session_id
+        # Modern-era (2026-07-28) requests have no session: an
+        # Mcp-Session-Id a client sends anyway is ignored, never echoed or
+        # logged as if it correlated anything.
+        effective_session_id = (
+            None if is_modern else (session_id or incoming_session_id)
+        )
 
         request_log_data = format_request_log(
             request_id=request_id,

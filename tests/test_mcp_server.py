@@ -13,6 +13,7 @@ Run with::
     python -m unittest tests.test_mcp_server
 """
 
+import json
 import logging
 import unittest
 from typing import Any, Dict, List, Optional
@@ -79,43 +80,115 @@ class ProtocolNegotiationTests(unittest.IsolatedAsyncioTestCase):
         )
         return response["result"]
 
-    async def test_supported_versions_are_echoed_back(self):
-        for version in MCPServer.SUPPORTED_PROTOCOL_VERSIONS:
+    async def test_legacy_versions_are_echoed_back(self):
+        for version in MCPServer.LEGACY_PROTOCOL_VERSIONS:
             with self.subTest(version=version):
                 result = await self._initialize(version)
                 self.assertEqual(result["protocolVersion"], version)
 
-    async def test_2026_07_28_is_not_advertised_as_supported(self):
+    async def test_2026_07_28_is_supported_but_never_negotiated_here(self):
         """It replaces initialize with server/discover — a real migration.
 
-        Listing it would be a claim we implement a handshake we do not.
+        The version IS served (statelessly, via per-request ``_meta``; see
+        test_modern_protocol), so it is advertised. But ``initialize`` is
+        the legacy handshake: echoing 2026-07-28 on it would promise
+        stateless semantics on a session-based exchange.
         """
-        self.assertNotIn("2026-07-28", MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
-
-    async def test_unsupported_version_downgrades_to_newest_supported(self):
+        self.assertIn("2026-07-28", MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
+        self.assertNotIn("2026-07-28", MCPServer.LEGACY_PROTOCOL_VERSIONS)
         result = await self._initialize("2026-07-28")
+        self.assertNotEqual(result["protocolVersion"], "2026-07-28")
+
+    async def test_unsupported_version_downgrades_to_newest_legacy(self):
+        result = await self._initialize("2099-01-01")
         self.assertEqual(
             result["protocolVersion"],
-            MCPServer.SUPPORTED_PROTOCOL_VERSIONS[-1],
+            "2025-11-25",
             "An unsupported request must be answered with the newest "
-            "revision we really speak, so the client can decide.",
+            "legacy revision we really speak, so the client can decide.",
         )
 
-    async def test_newest_supported_is_last_in_the_tuple(self):
-        """The downgrade path indexes [-1]; ordering is load-bearing."""
-        versions = list(MCPServer.SUPPORTED_PROTOCOL_VERSIONS)
-        self.assertEqual(
-            versions,
-            sorted(versions),
-            "SUPPORTED_PROTOCOL_VERSIONS must stay in ascending date order",
-        )
+    async def test_newest_is_first_in_each_tuple(self):
+        """The downgrade path indexes [0]; ordering is load-bearing, and
+        server/discover's supportedVersions mirrors it newest-first like
+        the spec's own example."""
+        for name in ("LEGACY_PROTOCOL_VERSIONS", "SUPPORTED_PROTOCOL_VERSIONS"):
+            with self.subTest(tuple=name):
+                versions = list(getattr(MCPServer, name))
+                self.assertEqual(
+                    versions,
+                    sorted(versions, reverse=True),
+                    f"{name} must stay in descending date order",
+                )
+        self.assertEqual(MCPServer.SUPPORTED_PROTOCOL_VERSIONS[0], "2026-07-28")
 
     async def test_missing_version_still_initializes(self):
         result = await self._initialize(None)
+        self.assertEqual(result["protocolVersion"], "2025-11-25")
+
+    async def test_legacy_initialize_response_is_unchanged(self):
+        """Pinned byte-for-byte: a legacy client must see no change from
+        the dual-era work. No resultType, no _meta, historical serverInfo.
+        """
+        result = await self._initialize("2025-11-25")
         self.assertEqual(
-            result["protocolVersion"],
-            MCPServer.SUPPORTED_PROTOCOL_VERSIONS[-1],
+            result,
+            {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "ebird-mcp", "version": "1.0.0"},
+            },
         )
+
+
+class LegacyUnknownMethodTests(unittest.IsolatedAsyncioTestCase):
+    """Clients probe for optional methods; the answer is -32601, logged at
+    WARNING with no traceback, and the legacy transport keeps HTTP 200."""
+
+    async def test_unknown_method_is_method_not_found(self):
+        server = MCPServer(_StubPluginManager())
+        response = await server.handle_request(
+            {"jsonrpc": "2.0", "id": 7, "method": "resources/list"}
+        )
+        self.assertEqual(
+            response,
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "error": {
+                    "code": -32601,
+                    "message": "Method not found",
+                    "data": "Unknown method: resources/list",
+                },
+            },
+        )
+
+    async def test_unknown_method_logged_as_warning_without_traceback(self):
+        server = MCPServer(_StubPluginManager())
+        with self.assertLogs("core.mcp_server", level="DEBUG") as captured:
+            await server.handle_request(
+                {"jsonrpc": "2.0", "id": 7, "method": "resources/list"}
+            )
+        records = [r for r in captured.records if r.levelno >= logging.WARNING]
+        self.assertTrue(records)
+        self.assertTrue(all(r.levelno == logging.WARNING for r in records))
+        self.assertTrue(all(r.exc_info is None for r in records))
+
+    async def test_unknown_notification_is_dropped(self):
+        server = MCPServer(_StubPluginManager())
+        response = await server.handle_request(
+            {"jsonrpc": "2.0", "method": "notifications/whatever"}
+        )
+        self.assertIsNone(response)
+
+    async def test_unknown_method_stays_http_200_on_legacy_transport(self):
+        server = MCPServer(_StubPluginManager())
+        response = await server.handle_http_request(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}),
+            {"mcp-protocol-version": "2025-11-25"},
+        )
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(json.loads(response["body"])["error"]["code"], -32601)
 
 
 class UnknownToolTests(unittest.IsolatedAsyncioTestCase):
