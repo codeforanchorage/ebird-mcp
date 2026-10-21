@@ -152,6 +152,13 @@ class UniversalHTTPHandler:
         # Normalize header names: the Lambda adapter lowercases them, but the
         # local aiohttp server passes them through as sent (e.g. "Origin").
         headers = {k.lower(): v for k, v in headers.items()} if headers else {}
+        # Normalize the body too: API Gateway hands the Lambda adapter
+        # `"body": null` for a bodyless request (every GET), where aiohttp
+        # gives "". json.loads(None) is a TypeError, not a JSONDecodeError,
+        # and the pre-parse below runs before the method check -- so
+        # without this a GET /mcp was a 500 on prod and a 405 locally.
+        if body is None:
+            body = ""
 
         incoming_session_id = headers.get("mcp-session-id")
         request_origin = headers.get("origin")

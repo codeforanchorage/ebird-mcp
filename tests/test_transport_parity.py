@@ -256,6 +256,24 @@ class PathAndMethodTests(_TransportCase):
         self.assertEqual(status, 405)
         self.assertEqual(headers.get("Allow"), "POST")
 
+    async def test_get_with_null_body_is_still_405(self):
+        """API Gateway gives the Lambda adapter `"body": null` on a GET
+        (aiohttp gives ""). The handler pre-parses the body before the
+        method check, and json.loads(None) is a TypeError -- which made
+        GET /mcp a 500 on prod while every local run said 405. The two
+        entry points must agree, and they must agree on 405."""
+        status, headers, body = await self.post(method="GET", body=None)
+        self.assertEqual(status, 405)
+        self.assertEqual(headers.get("Allow"), "POST")
+        self.assertEqual(json.loads(body)["error"]["message"], "Method Not Allowed")
+
+    async def test_post_with_null_body_is_a_parse_error(self):
+        """Same shape on a POST: a missing body is the caller's -32700,
+        not our 500."""
+        status, _, body = await self.post(body=None)
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(body)["error"]["code"], -32700)
+
     async def test_delete_is_not_allowed(self):
         """Spec session termination; this server is stateless."""
         status, _, _ = await self.post(method="DELETE")
