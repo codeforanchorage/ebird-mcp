@@ -652,5 +652,52 @@ class LoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(rec, "mcp_protocol_version"))
 
 
+class TraceContextLoggingTests(unittest.IsolatedAsyncioTestCase):
+    """Spec 2026-07-28 documents W3C trace-context keys (``traceparent``,
+    ``tracestate``, ``baggage``) as conventional ``_meta`` entries. The
+    first two are flattened onto the request log line so a caller's trace
+    can be joined to our CloudWatch records; ``baggage`` is free-form and
+    is not copied."""
+
+    TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+    async def _received(self, request):
+        with self.assertLogs("core.mcp_server", level="INFO") as cap:
+            await _server().handle_request(request)
+        recs = [
+            r for r in cap.records if r.getMessage() == "JSON-RPC request received"
+        ]
+        self.assertEqual(len(recs), 1)
+        return recs[0]
+
+    async def test_traceparent_and_tracestate_are_flattened(self):
+        request = _request("tools/list", capabilities={})
+        request["params"]["_meta"]["traceparent"] = self.TRACEPARENT
+        request["params"]["_meta"]["tracestate"] = "vendor=opaque"
+        request["params"]["_meta"]["baggage"] = "userId=alice"
+
+        rec = await self._received(request)
+
+        self.assertEqual(rec.otel_traceparent, self.TRACEPARENT)
+        self.assertEqual(rec.otel_tracestate, "vendor=opaque")
+        self.assertFalse(hasattr(rec, "otel_baggage"))
+        self.assertFalse(hasattr(rec, "baggage"))
+
+    async def test_absent_trace_context_adds_nothing(self):
+        rec = await self._received(_request("tools/list", capabilities={}))
+        self.assertFalse(hasattr(rec, "otel_traceparent"))
+        self.assertFalse(hasattr(rec, "otel_tracestate"))
+
+    async def test_non_string_trace_context_is_ignored(self):
+        """Only strings are copied: the keys are W3C header values, and a
+        structured value here is a confused client, not a trace."""
+        request = _request("tools/list", capabilities={})
+        request["params"]["_meta"]["traceparent"] = {"nested": True}
+        request["params"]["_meta"]["tracestate"] = ""
+        rec = await self._received(request)
+        self.assertFalse(hasattr(rec, "otel_traceparent"))
+        self.assertFalse(hasattr(rec, "otel_tracestate"))
+
+
 if __name__ == "__main__":
     unittest.main()

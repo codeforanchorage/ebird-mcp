@@ -201,11 +201,47 @@ class ProtocolVersionHeaderTests(_TransportCase):
             {"mcp-protocol-version": "1999-01-01"}
         )
         self.assertEqual(status, 400)
-        error = json.loads(body)["error"]
+        parsed = json.loads(body)
+        error = parsed["error"]
         self.assertEqual(error["code"], -32022)
         self.assertEqual(error["data"]["requested"], "1999-01-01")
         self.assertEqual(error["data"]["supported"][0], "2026-07-28")
         self.assertIn("2025-11-25", error["data"]["supported"])
+        # The spec's own UnsupportedProtocolVersionError example echoes
+        # the request id; a client with several requests in flight needs
+        # it to know which one was refused. This used to be null.
+        self.assertEqual(parsed["id"], 1)
+
+    async def test_unknown_version_without_an_id_keeps_null_id(self):
+        """A notification (no id) or an unparseable body cannot be
+        correlated, so the error keeps a null id rather than inventing
+        one."""
+        for label, body in (
+            (
+                "notification",
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            ),
+            ("unparseable", "{not json"),
+            ("non-object", "[1, 2]"),
+        ):
+            with self.subTest(body=label):
+                status, _, out = await self.post(
+                    {"mcp-protocol-version": "1999-01-01"}, body=body
+                )
+                self.assertEqual(status, 400)
+                parsed = json.loads(out)
+                self.assertIsNone(parsed["id"])
+                self.assertEqual(parsed["error"]["code"], -32022)
+
+    async def test_origin_and_path_errors_keep_null_id(self):
+        """Those happen before any body can be trusted; the spec says
+        they MAY have no id, and we do not go looking for one."""
+        status, _, body = await self.post({"origin": "https://evil.example"})
+        self.assertEqual(status, 403)
+        self.assertIsNone(json.loads(body)["id"])
+        status, _, body = await self.post(path="/nope")
+        self.assertEqual(status, 404)
+        self.assertIsNone(json.loads(body)["id"])
 
     async def test_absent_header_is_fine(self):
         """Older clients omit it; the spec says assume 2025-03-26."""

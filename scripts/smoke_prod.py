@@ -23,11 +23,19 @@ chained into the next tool the way the server's own instructions say.
 REQUEST BUDGET
 --------------
 Prod sits behind a WAF rate rule of 50 requests per 5 minutes per IP,
-aggregated on (IP, Host). This script makes ~24 requests and paces them,
+aggregated on (IP, Host). This script makes ~32 requests and paces them,
 so a single run is comfortable but two back-to-back runs inside five
-minutes can trip it -- a burst of 403s means the WAF, not a regression.
-It also spends ~6 calls against the eBird daily quota (1000/day); the
+minutes WILL trip it -- a burst of 403s means the WAF, not a regression.
+It also spends ~7 calls against the eBird daily quota (1000/day); the
 taxonomy checks are served from the bundled snapshot and cost nothing.
+
+ERAS
+----
+The legacy checks ride the initialize handshake (MCP 2025-11-25 and
+earlier). claude.ai and Claude Code open with the 2026-07-28 era instead
+(per-request ``_meta``, ``server/discover``, no session), so the modern
+block at the end is the one that sees a regression on the era real
+sessions actually use.
 """
 
 import json
@@ -221,7 +229,9 @@ for label, headers, expected in (
      {"Origin": "https://evil.example"}, 403),
     ("allowlisted Origin is accepted",
      {"Origin": "https://claude.ai"}, 200),
-    ("unsupported MCP-Protocol-Version is refused with 400",
+    ("unknown MCP-Protocol-Version is refused with 400",
+     {"MCP-Protocol-Version": "1999-01-01"}, 400),
+    ("modern MCP-Protocol-Version on a legacy body is refused with 400",
      {"MCP-Protocol-Version": "2026-07-28"}, 400),
     ("supported MCP-Protocol-Version is accepted",
      {"MCP-Protocol-Version": "2025-11-25"}, 200),
@@ -345,6 +355,176 @@ try:
           str(result.get("error"))[:80])
 except Exception as e:
     check("regionCode validation", False, repr(e))
+
+print("\n-- modern era (MCP 2026-07-28: stateless, per-request _meta) ----")
+
+# Everything above rides the legacy initialize handshake. claude.ai and
+# Claude Code open with this era instead, so a regression here is invisible
+# to the legacy checks yet breaks every real session.
+
+MODERN = "2026-07-28"
+MODERN_META = {
+    "io.modelcontextprotocol/protocolVersion": MODERN,
+    "io.modelcontextprotocol/clientInfo": {"name": "smoke", "version": "1.0"},
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+SERVER_NAME = "eBird MCP"
+TOOL_COUNT = 10
+
+
+def modern(method, params=None, rid=None, name=None, version=MODERN):
+    """A modern-era request: _meta stamped, the three mirror headers set.
+
+    Returns (status, parsed-or-None) without raising on 4xx.
+    """
+    global _id
+    _id += 1
+    params = dict(params or {})
+    params["_meta"] = {
+        **MODERN_META, "io.modelcontextprotocol/protocolVersion": version,
+    }
+    headers = {"MCP-Protocol-Version": version, "Mcp-Method": method}
+    if name:
+        headers["Mcp-Name"] = name
+    status, parsed, _ = raw(json.dumps(
+        {"jsonrpc": "2.0", "id": rid if rid is not None else _id,
+         "method": method, "params": params}), headers)
+    return status, parsed
+
+
+# 20. server/discover: the modern replacement for initialize
+try:
+    status, r = modern("server/discover")
+    res = r.get("result", {})
+    server_info = res.get("_meta", {}).get(
+        "io.modelcontextprotocol/serverInfo", {})
+    ok = (
+        status == 200
+        and res.get("supportedVersions", [None])[0] == MODERN
+        and "2025-03-26" in res.get("supportedVersions", [])
+        and res.get("resultType") == "complete"
+        and res.get("cacheScope") == "public"
+        and isinstance(res.get("ttlMs"), int)
+        and server_info.get("name") == SERVER_NAME
+        and bool(res.get("instructions"))
+    )
+    check("modern: server/discover", ok,
+          f"status={status} versions={res.get('supportedVersions')} "
+          f"serverInfo={server_info}")
+except Exception as e:
+    check("modern: server/discover", False, repr(e))
+
+# 21. tools/list carries the CacheableResult hints and resultType
+try:
+    status, r = modern("tools/list")
+    res = r.get("result", {})
+    names = [t["name"] for t in res.get("tools", [])]
+    ok = (
+        status == 200
+        and len(names) == TOOL_COUNT
+        and res.get("resultType") == "complete"
+        and res.get("ttlMs") == 300_000
+        and res.get("cacheScope") == "public"
+        and all(t.get("title") and t.get("outputSchema")
+                for t in res.get("tools", []))
+    )
+    check("modern: tools/list cache hints + titles + schemas", ok,
+          f"status={status} n={len(names)} ttlMs={res.get('ttlMs')}")
+    # Deterministic order (spec SHOULD): a second listing must match.
+    status2, r2 = modern("tools/list")
+    names2 = [t["name"] for t in r2.get("result", {}).get("tools", [])]
+    check("modern: tools/list order is deterministic", names == names2,
+          "identical" if names == names2 else "order differs between calls")
+except Exception as e:
+    check("modern: tools/list cache hints + titles + schemas", False, repr(e))
+
+# 22. tools/call with mirrored Mcp-Name header; result stamped resultType.
+#     One cheap live call (taxonomy forms for a species that always exists).
+try:
+    tool = "ebird__get_taxonomy_forms"
+    status, r = modern(
+        "tools/call", {"name": tool, "arguments": {"speciesCode": "amecro"}},
+        name=tool,
+    )
+    res = r.get("result", {})
+    ok = (
+        status == 200
+        and res.get("resultType") == "complete"
+        and not res.get("isError")
+        and res.get("structuredContent") is not None
+        and "io.modelcontextprotocol/serverInfo" in res.get("_meta", {})
+    )
+    check("modern: tools/call get_taxonomy_forms", ok,
+          f"status={status} keys={sorted(res)[:6]}")
+except Exception as e:
+    check("modern: tools/call get_taxonomy_forms", False, repr(e))
+
+# 23. ping is gone in this era: 404 + -32601, not a silent {}
+try:
+    status, r = modern("ping")
+    ok = status == 404 and r["error"]["code"] == -32601
+    check("modern: ping -> 404/-32601", ok,
+          f"status={status} body={json.dumps(r)[:80]}")
+except Exception as e:
+    check("modern: ping -> 404/-32601", False, repr(e))
+
+# 24. unsupported version -> 400 / -32022 listing what we serve, id echoed
+try:
+    status, r = modern("tools/list", rid=4242, version="2099-01-01")
+    err = r.get("error", {})
+    ok = (
+        status == 400
+        and err.get("code") == -32022
+        and err.get("data", {}).get("requested") == "2099-01-01"
+        and MODERN in err.get("data", {}).get("supported", [])
+        and r.get("id") == 4242
+    )
+    check("modern: unsupported version -> 400/-32022 (id echoed)", ok,
+          f"status={status} id={r.get('id')} code={err.get('code')}")
+except Exception as e:
+    check("modern: unsupported version -> 400/-32022 (id echoed)",
+          False, repr(e))
+
+# 25. header/body disagreement -> 400 / -32020 HeaderMismatch
+try:
+    status, r, _ = raw(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                    "params": {"_meta": MODERN_META}}),
+        {"MCP-Protocol-Version": MODERN, "Mcp-Method": "ping"},
+    )
+    ok = status == 400 and r["error"]["code"] == -32020
+    check("modern: header mismatch -> 400/-32020", ok, f"status={status}")
+except Exception as e:
+    check("modern: header mismatch -> 400/-32020", False, repr(e))
+
+# 26. missing clientCapabilities -> malformed, 400 / -32602
+try:
+    status, r, _ = raw(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                    "params": {"_meta": {
+                        "io.modelcontextprotocol/protocolVersion": MODERN}}}),
+        {"MCP-Protocol-Version": MODERN, "Mcp-Method": "tools/list"},
+    )
+    ok = status == 400 and r["error"]["code"] == -32602
+    check("modern: missing clientCapabilities -> 400/-32602", ok,
+          f"status={status}")
+except Exception as e:
+    check("modern: missing clientCapabilities -> 400/-32602", False, repr(e))
+
+# 27. transport hygiene is era-independent: GET is 405 (no standalone SSE
+#     stream here), a disallowed Origin is 403 even on a modern request
+try:
+    status, _, _ = raw(None, {"Accept": "text/event-stream"}, method="GET")
+    check("modern: GET /mcp -> 405", status == 405, f"status={status}")
+    status, _, _ = raw(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "server/discover",
+                    "params": {"_meta": MODERN_META}}),
+        {"MCP-Protocol-Version": MODERN, "Mcp-Method": "server/discover",
+         "Origin": "https://evil.example"},
+    )
+    check("modern: bad Origin -> 403", status == 403, f"status={status}")
+except Exception as e:
+    check("modern: transport hygiene", False, repr(e))
 
 print("\n" + "-" * 63)
 failed = [label for label, ok in results if not ok]

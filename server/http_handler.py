@@ -186,6 +186,28 @@ class UniversalHTTPHandler:
             error_headers.update(self._get_cors_headers(request_origin))
             return (403, error_headers, error_body)
 
+        # Pre-parse JSON once, up front: to echo the JSON-RPC id on the
+        # transport-level version error below (the spec's own
+        # UnsupportedProtocolVersionError example carries the request's id,
+        # and a client correlating several in-flight requests needs it to
+        # know which one was refused), to detect initialize (mint a session
+        # ID), and to classify the era. The core parses the body again so a
+        # malformed body still gets its -32700 there; the body is small and
+        # the isolation is worth the second parse. A notification (no id)
+        # or an unparseable body cannot be correlated, so the id stays
+        # null rather than being invented.
+        body_request_id = None
+        try:
+            request_json = json.loads(body)
+            body_request_id = request_json.get("id")
+            is_initialize = request_json.get("method") == "initialize"
+            is_modern = (
+                MCPServer.request_era(request_json, headers) == ERA_MODERN
+            )
+        except (json.JSONDecodeError, AttributeError):
+            is_initialize = False
+            is_modern = False
+
         # Spec (Streamable HTTP): a request carrying an invalid or
         # unsupported MCP-Protocol-Version header MUST get 400 Bad Request.
         # An absent header is fine (assume 2025-03-26 per spec). Both
@@ -220,7 +242,7 @@ class UniversalHTTPHandler:
             error_body = json.dumps(
                 {
                     "jsonrpc": "2.0",
-                    "id": None,
+                    "id": body_request_id,
                     "error": {
                         "code": -32022,
                         "message": "Unsupported protocol version",
@@ -288,18 +310,6 @@ class UniversalHTTPHandler:
             error_headers = {"Content-Type": "application/json; charset=utf-8", "Allow": "POST"}
             error_headers.update(self._get_cors_headers(request_origin))
             return (405, error_headers, error_body)
-
-        # Pre-parse JSON only to detect initialize (mint a session ID) and
-        # classify the era.
-        try:
-            request_json = json.loads(body)
-            is_initialize = request_json.get("method") == "initialize"
-            is_modern = (
-                MCPServer.request_era(request_json, headers) == ERA_MODERN
-            )
-        except (json.JSONDecodeError, AttributeError):
-            is_initialize = False
-            is_modern = False
 
         session_id = None
         if is_initialize:
