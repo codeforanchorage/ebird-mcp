@@ -180,7 +180,7 @@ Paste that URL into Claude (Settings → Connectors → Add custom connector). D
 
 ## Configuration
 
-`config.yaml` is loaded at Terraform plan time, JSON-encoded, and baked into the Lambda's `EBIRD_MCP_CONFIG` environment variable. At runtime, the handler reads it (or falls back to `config.yaml` if the env var is missing, which is the local-dev path).
+`config.yaml` is loaded at Terraform plan time, JSON-encoded, and baked into the Lambda's `OPENCONTEXT_CONFIG` environment variable. At runtime, the handler reads it (or falls back to `config.yaml` if the env var is missing, which is the local-dev path).
 
 ```yaml
 server_name: "eBird MCP"
@@ -202,7 +202,7 @@ logging:
   format: "json"
 ```
 
-> The eBird API key lives in `config.yaml` and is visible to anyone with `lambda:GetFunctionConfiguration` on the function. Acceptable for a low-cost API key; if you want stronger isolation, switch the `EBIRD_MCP_CONFIG` env var for an SSM `SecureString` lookup in `server/http_handler.py::_load_config` and grant the Lambda role `ssm:GetParameter`.
+> The eBird API key lives in `config.yaml` and is visible to anyone with `lambda:GetFunctionConfiguration` on the function. Acceptable for a low-cost API key; if you want stronger isolation, switch the `OPENCONTEXT_CONFIG` env var for an SSM `SecureString` lookup in `server/http_handler.py::_load_config` and grant the Lambda role `ssm:GetParameter`.
 
 ## Tools
 

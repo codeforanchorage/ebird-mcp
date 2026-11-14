@@ -81,7 +81,10 @@ resource "aws_lambda_function" "mcp_server" {
 
   environment {
     variables = {
-      EBIRD_MCP_CONFIG = local.config_json
+      # The shared core (opencontext-core) reads its config from
+      # OPENCONTEXT_CONFIG. This was EBIRD_MCP_CONFIG while this repo
+      # carried its own copy of the core.
+      OPENCONTEXT_CONFIG = local.config_json
     }
   }
 

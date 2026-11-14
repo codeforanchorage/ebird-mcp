@@ -13,6 +13,10 @@ server_name: "eBird MCP"
 description: "eBird API access for MCP clients (Claude, etc.) - recent observations, notable birds, hotspots, taxonomy"
 organization: "Code for Anchorage"
 
+# Reject request bodies larger than this (bytes) with HTTP 413 before
+# they are parsed. No eBird tool takes large arguments.
+server_max_body_bytes: 65536
+
 plugins:
   # Built-in: eBird (https://api.ebird.org/v2)
   ebird:

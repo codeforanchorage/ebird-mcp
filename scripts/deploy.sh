@@ -104,9 +104,9 @@ PACKAGE_DIR=".deploy"
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
 
-cp -r core "$PACKAGE_DIR/"
+# core/ and server/ are NOT copied: they come from the opencontext-core
+# requirement, which the install step below places next to plugins/.
 cp -r plugins "$PACKAGE_DIR/"
-cp -r server "$PACKAGE_DIR/"
 mkdir -p "$PACKAGE_DIR/custom_plugins"
 cp requirements.txt "$PACKAGE_DIR/" 2>/dev/null || true
 
@@ -122,7 +122,15 @@ if command -v uv &> /dev/null; then
     fi
 else
     echo "uv not found, using pip..."
-    if ! pip install -r requirements.txt -t "$PACKAGE_DIR/" \
+    # opencontext-core comes from a git tag, so pip has to BUILD it,
+    # and pip refuses to build anything while --platform/
+    # --python-version are set. It is pure Python: install it in a
+    # second step with no platform flags and --no-deps (its own
+    # dependencies are in requirements.txt and arrive with this one).
+    BINARY_REQS="$PACKAGE_DIR/.requirements-binary.txt"
+    CORE_REQ=$(grep -E '^opencontext-core[ @]' requirements.txt | tr -d '\r' || true)
+    grep -vE '^opencontext-core[ @]' requirements.txt > "$BINARY_REQS"
+    if ! pip install -r "$BINARY_REQS" -t "$PACKAGE_DIR/" \
         --platform manylinux2014_x86_64 \
         --implementation cp \
         --python-version 3.11 \
@@ -130,7 +138,22 @@ else
         --no-compile; then
         echo -e "${RED}pip install failed (ensure pip>=23.0)${NC}"; exit 1
     fi
+    rm -f "$BINARY_REQS"
+    if [ -n "$CORE_REQ" ]; then
+        if ! pip install "$CORE_REQ" -t "$PACKAGE_DIR/" --no-deps --no-compile; then
+            echo -e "${RED}opencontext-core install failed${NC}"; exit 1
+        fi
+    fi
 fi
+
+# The handler string is server.adapters.aws_lambda.lambda_handler, so a
+# package without these files is a Lambda that cannot start.
+for required in core/mcp_server.py server/adapters/aws_lambda.py; do
+    if [ ! -f "$PACKAGE_DIR/$required" ]; then
+        echo -e "${RED}$required is missing from the package. Is opencontext-core in requirements.txt?${NC}"
+        exit 1
+    fi
+done
 
 ZIP_FILE="lambda-deployment.zip"
 rm -f "$ZIP_FILE"
