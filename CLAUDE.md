@@ -13,7 +13,7 @@ A hosted Model Context Protocol (MCP) server for the eBird v2 API. Runs as a sin
 copy config-example.yaml config.yaml          # then edit api_key
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 python scripts/local_server.py                # http://localhost:8000/mcp
 
 # Smoke test the running server (requires jq + Git Bash on Windows)

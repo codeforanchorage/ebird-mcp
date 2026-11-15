@@ -117,7 +117,7 @@ copy config-example.yaml config.yaml
 # 2. Install dev deps
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # 3. Run the unit tests (no network — upstream calls are stubbed)
 python -m unittest discover tests
