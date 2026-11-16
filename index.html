@@ -676,7 +676,7 @@
 <p>The deploy script handles everything else: it validates your config, bundles the full eBird taxonomy into the package (so common taxonomy lookups never touch your eBird quota), builds the Lambda zip, and runs <code>terraform apply</code>. Full architecture and operational notes are in the <a href="https://github.com/codeforanchorage/ebird-mcp">repo README</a> and <code>CLAUDE.md</code>.</p>
 <div class="admonition tip">
 <p class="admonition-title">Test locally before deploying</p>
-<p>You don't need AWS to try the code: <code>pip install -r requirements.txt</code>, then <code>python scripts/local_server.py</code> serves the identical MCP endpoint on <code>http://localhost:8000/mcp</code>. Point the MCP Inspector or any local client at it.</p>
+<p>You don't need AWS to try the code: <code>pip install -r requirements-dev.txt</code>, then <code>python scripts/local_server.py</code> serves the identical MCP endpoint on <code>http://localhost:8000/mcp</code> (<code>--port</code> picks another port). Point the MCP Inspector or any local client at it.</p>
 </div>
 <hr />
 <h2 id="fork-it-for-your-own-data-source">Fork it for your own data source<a class="headerlink" href="#fork-it-for-your-own-data-source" title="Permanent link">&para;</a></h2>
