@@ -35,7 +35,35 @@ project_root = Path(__file__).parent.parent.resolve()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-import yaml  # noqa: E402
+# Which config the server runs on. Resolved BEFORE the handler is imported,
+# and handed to it through OPENCONTEXT_CONFIG (which accepts a YAML path as
+# well as the JSON Terraform injects), so there is exactly one answer.
+#
+# This used to be read here for the logging level only, while the handler
+# went on loading ./config.yaml by itself: EBIRD_MCP_CONFIG_FILE looked
+# honoured -- the server started, the log level changed -- and every
+# request was still served from the other file, API key and all.
+#
+# Precedence: OPENCONTEXT_CONFIG if already set (same as prod), then
+# EBIRD_MCP_CONFIG_FILE, then config.yaml at the repo root -- NOT the
+# process CWD, so the script works from any directory.
+_config_path = os.path.abspath(
+    os.environ.get("EBIRD_MCP_CONFIG_FILE", str(project_root / "config.yaml"))
+)
+# The core discovers plugins relative to the CWD (plugins/, custom_plugins/),
+# so run from the repo root wherever the script was launched from. Done
+# AFTER resolving the config path above, so a relative
+# EBIRD_MCP_CONFIG_FILE still means relative to where the user typed it.
+os.chdir(project_root)
+if not os.environ.get("OPENCONTEXT_CONFIG"):
+    if not os.path.isfile(_config_path):
+        raise SystemExit(
+            f"Config file not found: {_config_path}\n"
+            f"Copy config-example.yaml to config.yaml, or point "
+            f"EBIRD_MCP_CONFIG_FILE at one."
+        )
+    os.environ["OPENCONTEXT_CONFIG"] = _config_path
+
 from aiohttp import web  # noqa: E402
 
 from core.logging_utils import configure_json_logging  # noqa: E402
@@ -45,11 +73,9 @@ from server.http_handler import UniversalHTTPHandler  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-_config_path = os.environ.get(
-    "EBIRD_MCP_CONFIG_FILE", str(project_root / "config.yaml")
-)
-with open(_config_path) as f:
-    config = yaml.safe_load(f)
+# The handler's own loader, so logging is configured from the very config
+# requests are served with.
+config = http_handler._load_config()
 
 logging_config = get_logging_config(config)
 configure_json_logging(

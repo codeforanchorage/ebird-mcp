@@ -115,7 +115,7 @@ Key design points future Claude should know before editing:
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
-- `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs. Port via `--port` / `EBIRD_MCP_PORT` (default 8000).
+- `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs. Port via `--port` / `EBIRD_MCP_PORT` (default 8000). Config: `OPENCONTEXT_CONFIG` if set (JSON or a YAML path, as in prod), else `EBIRD_MCP_CONFIG_FILE`, else the repo-root `config.yaml` — the script hands its choice to the handler through `OPENCONTEXT_CONFIG` and `chdir`s to the repo root (plugin discovery is CWD-relative), so it runs from any directory; `tests/test_local_server_config.py` pins that the override reaches the request handler, not just the log level.
 - `stdio_bridge.py` — thin stdio<->HTTP shim for stdio-only MCP clients (forwards to a running HTTP server). Forwards the server's JSON-RPC error body on a 4xx rather than flattening it to `HTTP 400`.
 
 ## Files NOT under version control (rebuilt or local-only)
