@@ -1,0 +1,38 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Lambda runtime (terraform/aws/main.tf); test what ships.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: python -m ruff check .
+
+      # pytest rather than `unittest discover`: it runs the same TestCase
+      # classes PLUS the function-style tests in tests/test_core_dependency.py
+      # (which unittest silently skips), and applies the tests/conftest.py
+      # global-state fixture to every test. No network, no config.yaml and
+      # no eBird key needed: upstream calls are stubbed.
+      - name: Test
+        run: python -m pytest tests -q

@@ -15,6 +15,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
 python scripts/local_server.py                # http://localhost:8000/mcp
+python scripts/local_server.py --port 8931    # or EBIRD_MCP_PORT; 8000 is often taken
 
 # Smoke test the running server (requires jq + Git Bash on Windows)
 bash ./scripts/test_streamable_http.sh        # defaults to localhost:8000
@@ -30,14 +31,15 @@ python scripts/smoke_prod.py                  # defaults to prod
 python scripts/smoke_prod.py https://<staging-host>/staging/mcp
 ```
 
-Tests: `python -m unittest discover tests` — plain unittest, no network (upstream calls are stubbed). Also runnable under pytest, which additionally applies the `tests/conftest.py` global-state fixture to every test.
+Tests: `python -m unittest discover tests` — plain unittest, no network (upstream calls are stubbed). Also runnable under pytest (`python -m pytest tests`), which additionally applies the `tests/conftest.py` global-state fixture to every test **and is the only runner that collects the function-style tests in `test_core_dependency.py`** — unittest skips them silently. CI (`.github/workflows/tests.yml`) runs ruff and pytest on Python 3.14 for every push to main and every PR. The protocol and transport tests (JSON-RPC dispatch, era negotiation, local/prod transport parity) live in the `opencontext-core` package, not here.
 
 - `test_civic_ai_patterns.py` — caveat precedence and text formatting.
 - `test_input_validation.py` — path-traversal rejection (`regionCode`/`speciesCode` flow into upstream URL paths) and numeric clamps.
-- `test_mcp_server.py` — JSON-RPC dispatch, protocol negotiation, caller-vs-fault error classification.
 - `test_caller_error_logging.py` — WARNING-without-traceback for caller mistakes; an AST sweep keeps numeric coercion of caller args inside `_clamp_int`/`_coerce_float`.
 - `test_structured_output.py` — validates REAL tool output against the declared schemas with `jsonschema`, on every awkward branch (zero rows, null `howMany`, cap hit, sparse rows, unparseable dates, clipped text).
-- `test_tool_metadata.py`, `test_transport_parity.py`, `test_domain_correctness.py`, `test_config_invariants.py` — title/schema maps, the six transport cases local must match prod on, false-zero/grain checks, and the timeout ladder.
+- `test_upstream_failures.py` — timeouts are never retried, exhausted retries surface a readable error (no tenacity `RetryError` repr), and the `get_nearby_hotspots` CSV fallback fires only on a JSON decode failure.
+- `test_core_dependency.py` — the `opencontext-core` seam: not vendored, importable, discovers this repo's plugins, installed version matches the pin, pin identical in both files.
+- `test_tool_metadata.py`, `test_domain_correctness.py`, `test_config_invariants.py` — title/schema maps, false-zero/grain checks, and the timeout ladder.
 
 Lint: `python -m ruff check .` — must be clean. Do NOT run `ruff format`; this repo is hand-wrapped at ~79 cols and a format pass produces a thousand-line diff. `jsonschema` is a dev-only dependency (`pyproject.toml` `[project.optional-dependencies].dev`) and is never imported by the Lambda.
 
@@ -113,8 +115,8 @@ Key design points future Claude should know before editing:
 - `terraform/aws/main.tf` — Lambda + IAM; reads `config.yaml` at plan time.
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
-- `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs; `tests/test_transport_parity.py` pins that.
-- `stdio_bridge.py` — thin stdio<->HTTP shim for stdio-only MCP clients (forwards to a running HTTP server).
+- `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs. Port via `--port` / `EBIRD_MCP_PORT` (default 8000).
+- `stdio_bridge.py` — thin stdio<->HTTP shim for stdio-only MCP clients (forwards to a running HTTP server). Forwards the server's JSON-RPC error body on a 4xx rather than flattening it to `HTTP 400`.
 
 ## Files NOT under version control (rebuilt or local-only)
 
