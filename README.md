@@ -62,7 +62,7 @@ Claude / MCP client
   -> POST <api-gateway>/mcp  (JSON-RPC 2.0)
      -> WAFv2 (rate limit, managed rules)
      -> API Gateway REST stage  (throttle, usage plan)
-        -> Lambda  (Python 3.11)
+        -> Lambda  (Python 3.14)
            server.adapters.aws_lambda.lambda_handler
               -> server.http_handler.UniversalHTTPHandler
                  -> core.mcp_server.MCPServer  (JSON-RPC dispatcher)
@@ -125,6 +125,8 @@ python -m unittest discover tests
 # 4. Run locally
 python scripts/local_server.py
 # Listening on http://localhost:8000/mcp
+# Port 8000 taken? python scripts/local_server.py --port 8931
+# (or set EBIRD_MCP_PORT), then pass the URL to the smoke test below.
 
 # 5. Smoke test (in another shell, requires jq)
 bash ./scripts/test_streamable_http.sh
@@ -171,7 +173,7 @@ copies of the same ten tools. Either way, restart Claude Code (or run
 The script will:
 1. Validate that exactly one plugin is enabled and that the eBird key is set.
 2. Refresh the bundled eBird taxonomy (`scripts/refresh_taxonomy.py` → `plugins/ebird/data/taxonomy.json`) so common taxonomy lookups are served from the deployment package instead of burning eBird API quota. A refresh failure is non-fatal — the plugin falls back to live API calls.
-3. Build `.deploy/` with all dependencies installed for `x86_64-manylinux2014` / Python 3.11.
+3. Build `.deploy/` with all dependencies installed for `x86_64-manylinux2014` / Python 3.14 (the Lambda runtime).
 4. Zip into `lambda-deployment.zip` and copy it (and `config.yaml`) into `terraform/aws/`.
 5. Run `terraform plan` with the chosen `*.tfvars`, prompt for confirmation, then `terraform apply`.
 6. Print the public MCP endpoint URL.

@@ -1,9 +1,15 @@
 """Run the eBird MCP server locally for testing (no Lambda needed).
 
-  python scripts/local_server.py
+  python scripts/local_server.py                # port 8000
+  python scripts/local_server.py --port 8931    # or EBIRD_MCP_PORT=8931
 
 Then point Claude Desktop at http://localhost:8000/mcp via Settings ->
 Connectors -> Add custom connector, or hit it with curl.
+
+The port is configurable because 8000 is a popular default: another local
+MCP server already bound to it answers your probes instead, and nothing
+about the response says it is the wrong server. Startup therefore fails
+loudly if the port is taken rather than carrying on.
 
 This is deliberately a THIN adapter onto UniversalHTTPHandler, mirroring
 ``server/adapters/aws_lambda.py``. Everything protocol-level — the Origin
@@ -15,6 +21,7 @@ meant none of that behaviour could be reproduced or regression-tested
 outside deployed AWS.
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -133,7 +140,27 @@ async def handle_other_method(request):
     return await handle_mcp_request(request)
 
 
-async def start_server():
+DEFAULT_PORT = 8000
+
+
+def _parse_port(argv=None) -> int:
+    """--port, else EBIRD_MCP_PORT, else 8000."""
+    parser = argparse.ArgumentParser(
+        description="Run the eBird MCP server locally."
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("EBIRD_MCP_PORT", DEFAULT_PORT)),
+        help=(
+            f"Port to listen on (default: EBIRD_MCP_PORT, "
+            f"else {DEFAULT_PORT})."
+        ),
+    )
+    return parser.parse_args(argv).port
+
+
+async def start_server(port: int = DEFAULT_PORT):
     await init_server()
 
     app = web.Application()
@@ -144,22 +171,31 @@ async def start_server():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, "localhost", 8000)
-    await site.start()
+    site = web.TCPSite(runner, "localhost", port)
+    try:
+        await site.start()
+    except OSError as e:
+        await runner.cleanup()
+        raise SystemExit(
+            f"Could not listen on localhost:{port} ({e}). Something else "
+            f"is probably using the port; pick another with --port."
+        )
+
+    url = f"http://localhost:{port}/mcp"
 
     print()
     print("=" * 50)
     print("eBird MCP Server running")
     print("=" * 50)
-    print("URL: http://localhost:8000/mcp")
+    print(f"URL: {url}")
     print()
     print("Connect via Claude Connectors:")
     print("  1. Settings -> Connectors -> Add custom connector")
-    print("  2. Name: eBird MCP   URL: http://localhost:8000/mcp")
+    print(f"  2. Name: eBird MCP   URL: {url}")
     print()
     print("Test:")
-    print("  bash scripts/test_streamable_http.sh")
-    print("  curl -X POST http://localhost:8000/mcp \\")
+    print(f"  bash scripts/test_streamable_http.sh {url}")
+    print(f"  curl -X POST {url} \\")
     print("    -H 'Content-Type: application/json' \\")
     print("    -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}'")
     print()
@@ -176,4 +212,4 @@ async def start_server():
 
 
 if __name__ == "__main__":
-    asyncio.run(start_server())
+    asyncio.run(start_server(_parse_port()))

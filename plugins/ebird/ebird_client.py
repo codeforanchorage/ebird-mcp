@@ -309,9 +309,15 @@ class EBirdClient:
         }
         try:
             return await self._get("/ref/hotspot/geo", params=params)
-        except Exception as e:
-            # The endpoint occasionally returns CSV even with fmt=json. Fall back
-            # to parsing the text response into a minimal hotspot shape.
+        except ValueError as e:
+            # The endpoint occasionally returns CSV even with fmt=json, which
+            # surfaces as a JSON decode error (a ValueError). Fall back to
+            # parsing the text response into a minimal hotspot shape.
+            #
+            # Deliberately NOT `except Exception`: a timeout, a 4xx/5xx or
+            # QuotaExhausted is not a format problem, and re-requesting on
+            # one doubles the upstream calls (and the quota spent) for a
+            # request that fails the same way again.
             logger.warning(
                 f"Falling back to text response for nearby hotspots: {e}"
             )
