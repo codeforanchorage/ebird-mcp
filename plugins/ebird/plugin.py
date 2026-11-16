@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from tenacity import (
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -216,10 +216,29 @@ TOOL_OUTPUT_SCHEMAS = {
 }
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry a transport failure that failed FAST; never a timeout.
+
+    A timeout has already spent the whole plugin budget (20s by default).
+    A second attempt cannot fit under the 28s Lambda timeout, so retrying
+    one converts a readable "upstream timed out" tool error into the
+    Lambda being killed mid-flight -- the opaque 502 the timeout ladder
+    exists to prevent. Connection resets, DNS failures and the like fail
+    in milliseconds and are worth one more try.
+    """
+    return isinstance(exc, httpx.TransportError) and not isinstance(
+        exc, httpx.TimeoutException
+    )
+
+
+# reraise=True: without it tenacity wraps the final failure in its own
+# RetryError, whose str() is "RetryError[<Future at 0x... raised
+# ConnectError>]" -- which execute_tool would then hand to the caller.
 _RETRY = retry(
     stop=stop_after_attempt(2),
     wait=wait_exponential(multiplier=1, min=1, max=4),
-    retry=retry_if_exception_type((httpx.TransportError, httpx.ReadTimeout)),
+    retry=retry_if_exception(_is_retryable),
+    reraise=True,
 )
 
 
@@ -625,6 +644,26 @@ class EBirdPlugin(MCPPlugin):
             body_excerpt = e.response.text[:500] if e.response is not None else ""
             msg = f"eBird API HTTP {e.response.status_code}: {body_excerpt}"
             logger.warning(msg)
+            return ToolResult(content=[], success=False, error_message=msg)
+        except httpx.TimeoutException as e:
+            # Upstream trouble, not a bug here: WARNING, no traceback. The
+            # message is written out because str() of an httpx timeout is
+            # usually empty.
+            msg = (
+                f"eBird API timed out: no response within "
+                f"{self.plugin_config.timeout}s. This is an upstream "
+                f"delay, not a problem with the request. Try again, or "
+                f"narrow the query (a smaller region, back, or dist)."
+            )
+            logger.warning("%s (%s in %s)", msg, type(e).__name__, tool_name)
+            return ToolResult(content=[], success=False, error_message=msg)
+        except httpx.TransportError as e:
+            msg = (
+                f"Could not reach the eBird API ({type(e).__name__}) after "
+                f"a retry. This is a network or upstream problem, not a "
+                f"problem with the request. Try again shortly."
+            )
+            logger.warning("%s (in %s): %s", msg, tool_name, e)
             return ToolResult(content=[], success=False, error_message=msg)
         except ToolInputError as e:
             # A required argument was missing. Same reasoning as above: the
