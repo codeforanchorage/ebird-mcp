@@ -105,7 +105,7 @@ config-example.yaml   template
 - AWS CLI configured (`aws configure`)
 - `zip` or PowerShell (for packaging on Windows)
 - An eBird API key — free, instant: <https://ebird.org/api/keygen>
-- (Optional) `uv` for faster dependency installs
+- `uv` (on PATH, or `pip install uv`) so deploys install the locked versions in `uv.lock`
 
 ## Quickstart — local
 
@@ -173,7 +173,7 @@ copies of the same ten tools. Either way, restart Claude Code (or run
 The script will:
 1. Validate that exactly one plugin is enabled and that the eBird key is set.
 2. Refresh the bundled eBird taxonomy (`scripts/refresh_taxonomy.py` → `plugins/ebird/data/taxonomy.json`) so common taxonomy lookups are served from the deployment package instead of burning eBird API quota. A refresh failure is non-fatal — the plugin falls back to live API calls.
-3. Build `.deploy/` with all dependencies installed for `x86_64-manylinux2014` / Python 3.14 (the Lambda runtime).
+3. Build `.deploy/` with the dependency versions in `uv.lock` (the ones CI tests) installed for `x86_64-manylinux2014` / Python 3.14 (the Lambda runtime), and stamp the package with a `BUILD_INFO.json` (commit, dirty, locked). Without `uv` it falls back to pip and `requirements.txt`, which is not locked.
 4. Zip into `lambda-deployment.zip` and copy it (and `config.yaml`) into `terraform/aws/`.
 5. Run `terraform plan` with the chosen `*.tfvars`, prompt for confirmation, then `terraform apply`.
 6. Print the public MCP endpoint URL.
@@ -233,6 +233,8 @@ logging:
 - **MCP protocol versions.** Negotiated per the spec — `2024-11-05` through `2025-11-25` are supported (`core/mcp_server.py::SUPPORTED_PROTOCOL_VERSIONS`); append newer revisions to that tuple as they ship, after checking their transport requirements against `server/http_handler.py`.
 
 ## Cost
+Commit before you deploy: the script refuses a working tree with uncommitted changes, so that what is live always matches a commit (`--allow-dirty` overrides, for emergencies).
+
 
 At AWS pricing as of mid-2026, with the default `prod.tfvars` settings (`api_quota_limit = 50000`, `lambda_reserved_concurrency = 50`):
 

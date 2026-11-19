@@ -43,7 +43,7 @@ Tests: `python -m unittest discover tests` — plain unittest, no network (upstr
 
 Lint: `python -m ruff check .` — must be clean. Do NOT run `ruff format`; this repo is hand-wrapped at ~79 cols and a format pass produces a thousand-line diff. `jsonschema` is a dev-only dependency (`pyproject.toml` `[project.optional-dependencies].dev`) and is never imported by the Lambda.
 
-The deploy script handles packaging: it builds `.deploy/` with `pip install --platform manylinux2014_x86_64 --python-version 3.14 --only-binary :all:` (or `uv` if present), zips to `lambda-deployment.zip`, and copies that plus `config.yaml` into `terraform/aws/` where Terraform reads them.
+The deploy script handles packaging: it refuses a dirty working tree, builds `.deploy/` from `uv.lock` (`uv export --locked` then `uv pip install --no-deps --python-platform x86_64-manylinux2014 --python-version 3.14`; `uv` on PATH or as `python -m uv`), writes `BUILD_INFO.json` (commit, dirty, locked) into the package, zips to `lambda-deployment.zip`, and copies that plus `config.yaml` into `terraform/aws/` where Terraform reads them. Without uv it falls back to pip and `requirements.txt`, which is NOT locked and says so.
 
 ## Architecture
 
