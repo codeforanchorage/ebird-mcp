@@ -21,7 +21,10 @@ python scripts/local_server.py --port 8931    # or EBIRD_MCP_PORT; 8000 is often
 bash ./scripts/test_streamable_http.sh        # defaults to localhost:8000
 bash ./scripts/test_streamable_http.sh https://your-endpoint/mcp
 
-# Deploy
+python scripts/stdio_server.py                # the same server over stdio
+
+# Deploy — COMMIT FIRST: deploy.sh refuses a dirty tree (--allow-dirty
+# overrides) and installs the versions in uv.lock
 bash ./scripts/setup-backend.sh               # one-time per AWS account
 bash ./scripts/deploy.sh --environment staging
 bash ./scripts/deploy.sh --environment prod
@@ -53,7 +56,8 @@ Request flow:
 Client -> POST /mcp (JSON-RPC 2.0)
   -> [AWS only] WAFv2 + API Gateway REST + usage plan
   -> server.adapters.aws_lambda.lambda_handler           (Lambda)
-     or scripts/local_server.py aiohttp app               (local)
+     or scripts/local_server.py aiohttp app               (local HTTP)
+     or scripts/stdio_server.py, one stdin line per POST  (local stdio)
      -> server.http_handler.UniversalHTTPHandler         (cloud-agnostic)
         -> core.mcp_server.MCPServer                     (JSON-RPC dispatcher)
            -> core.plugin_manager.PluginManager
@@ -116,7 +120,9 @@ Key design points future Claude should know before editing:
 - `terraform/aws/{api_gateway,waf,cloudwatch_alarms,access_logs}.tf` — the rest of the stack.
 - `terraform/aws/{staging,prod}.tfvars` — per-env quota, rate limits, concurrency.
 - `scripts/local_server.py` — thin aiohttp adapter onto `UniversalHTTPHandler`, the mirror of `server/adapters/aws_lambda.py`. Local dev therefore exercises the same Origin allowlist, `MCP-Protocol-Version` check, path/method validation and CORS that prod runs. Port via `--port` / `EBIRD_MCP_PORT` (default 8000). Config: `OPENCONTEXT_CONFIG` if set (JSON or a YAML path, as in prod), else `EBIRD_MCP_CONFIG_FILE`, else the repo-root `config.yaml` — the script hands its choice to the handler through `OPENCONTEXT_CONFIG` and `chdir`s to the repo root (plugin discovery is CWD-relative), so it runs from any directory; `tests/test_local_server_config.py` pins that the override reaches the request handler, not just the log level.
-- `stdio_bridge.py` — thin stdio<->HTTP shim for stdio-only MCP clients (forwards to a running HTTP server). Forwards the server's JSON-RPC error body on a 4xx rather than flattening it to `HTTP 400`.
+- `scripts/stdio_server.py` — the server over stdio, for clients that launch it as a subprocess. The third thin adapter onto `UniversalHTTPHandler` (each stdin line is the body of a POST to the MCP route; the response body is one stdout line), so nothing protocol-level lives in it. `sys.stdout` is pointed at stderr for the life of the process — stdout is protocol only — and a notification is never answered. `tests/test_stdio_server.py` drives it as a real subprocess. It replaced `stdio_bridge.py` (a stdin-to-HTTP forwarder).
+- `scripts/_local_config.py` — the one config-precedence rule both local entry points use.
+- `uv.lock` — exact dependency versions. CI syncs from it and `scripts/deploy.sh` installs from it, so what ships is what was tested. To upgrade: `uv lock --upgrade`, run the tests, commit the lock, deploy. `requirements.txt`/`pyproject.toml` still carry the `opencontext-core` pin and the lower bounds; after changing either, run `uv lock`.
 
 ## Files NOT under version control (rebuilt or local-only)
 

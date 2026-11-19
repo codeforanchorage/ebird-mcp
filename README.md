@@ -1,10 +1,20 @@
-# eBird MCP Server (AWS Lambda)
+# eBird MCP Server
 
 **Talk to Claude about birds.** A hosted [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude (and other MCP clients) query the [eBird v2 API](https://documenter.getpostman.com/view/664302/S1ENwy59) conversationally — recent sightings, notable rarities, hotspots, and the full eBird taxonomy, exposed as 10 callable tools.
 
 Ask Claude *"What rare birds have been seen in Alaska this week?"* and it picks the right tool, calls eBird, and answers in plain English with species, locations, and dates. No screen-scraping, no separate UI — just Claude with new abilities.
 
-Runs on AWS Lambda + API Gateway + WAF. Deployable to your own AWS account in about 10 minutes with one `terraform apply`. Hard cost ceiling at ~$25/month even under viral load, ~$8/month at typical use.
+The same server runs two ways, from the same plugin code:
+
+| | Hosted (AWS Lambda) | Local (stdio) |
+|---|---|---|
+| What it is | A public HTTPS endpoint: Lambda + API Gateway + WAF | A subprocess your MCP client launches |
+| Entry point | `server.adapters.aws_lambda.lambda_handler` | `scripts/stdio_server.py` |
+| Who it serves | Anyone you give the URL to | You, on your machine |
+| Needs | An AWS account, Terraform, an eBird API key | Python, an eBird API key |
+| Start here | [Quickstart — deploy to AWS](#quickstart--deploy-to-aws) | [Quickstart — local stdio server](#quickstart--local-stdio-server) |
+
+Hosted is deployable to your own AWS account in about 10 minutes with one `terraform apply`. Hard cost ceiling at ~$25/month even under viral load, ~$8/month at typical use. Local costs nothing and needs no AWS at all.
 
 Built by [Code for Anchorage](https://codeforanchorage.org), modeled on the [OpenContext](https://github.com/CityOfBoston/OpenContext) / [anchorage-gis-mcp](https://github.com/codeforanchorage/anchorage-gis-mcp) plugin architecture. Ports the tool surface of the upstream npm [`ebird-mcp-server`](https://www.npmjs.com/package/ebird-mcp-server) stdio reference into a hosted HTTP endpoint so anyone can connect Claude via a URL — no local install required.
 
@@ -78,20 +88,27 @@ Protocol version is negotiated per the spec: the server supports every revision 
 ## Repo layout
 
 ```
-core/                 framework: interfaces, MCP server, plugin manager, validators, logging
 plugins/ebird/        eBird plugin: tool definitions, eBird API client, output formatting
-server/
-  http_handler.py     universal (cloud-agnostic) HTTP handler
-  adapters/aws_lambda.py  Lambda event -> universal handler
-terraform/aws/        Terraform IaC: Lambda, API GW, WAF, alarms, access logs
-scripts/
-  deploy.sh           build .deploy/, zip, terraform apply
-  setup-backend.sh    create S3 + DynamoDB backend (one-time)
-  refresh_taxonomy.py fetch the full eBird taxonomy into plugins/ebird/data/taxonomy.json
-  test_streamable_http.sh  smoke test: initialize, list, call
-tests/                unit tests (plain unittest, no network): caveat/formatting behavior + input validation
-scripts/local_server.py  aiohttp adapter onto UniversalHTTPHandler for local testing
-stdio_bridge.py       stdio<->HTTP bridge for stdio-only MCP clients
+                      (the only server code in this repo; used by every mode below)
+
+(core/ and server/ are NOT in this repo: the JSON-RPC dispatcher, the HTTP
+handler and the Lambda adapter come from the opencontext-core package,
+pinned in requirements.txt and pyproject.toml.)
+
+Hosted (AWS Lambda)
+  terraform/aws/        Terraform IaC: Lambda, API GW, WAF, alarms, access logs
+  scripts/deploy.sh     build .deploy/ from uv.lock, zip, terraform apply
+  scripts/setup-backend.sh    create S3 + DynamoDB backend (one-time)
+  scripts/refresh_taxonomy.py fetch the full eBird taxonomy into plugins/ebird/data/taxonomy.json
+  scripts/smoke_prod.py       capability smoke test against a deployed endpoint
+
+Local
+  scripts/stdio_server.py  stdio MCP server: a client launches it as a subprocess
+  scripts/local_server.py  the same server over HTTP on localhost, for development
+  scripts/test_streamable_http.sh  HTTP smoke test: initialize, list, call
+
+tests/                unit tests (no network; upstream calls are stubbed)
+uv.lock               exact dependency versions: what CI tests and deploy.sh ships
 config.yaml           local config (gitignored; copy from config-example.yaml)
 config-example.yaml   template
 .mcp.json             Claude Code MCP config (gitignored; copy from .mcp.json.example)
@@ -107,7 +124,53 @@ config-example.yaml   template
 - An eBird API key — free, instant: <https://ebird.org/api/keygen>
 - `uv` (on PATH, or `pip install uv`) so deploys install the locked versions in `uv.lock`
 
-## Quickstart — local
+## Quickstart — local stdio server
+
+For MCP clients that launch a server as a subprocess (Claude Desktop's
+config file, Claude Code, most IDE integrations). No AWS, no HTTP server.
+
+```powershell
+# 1. Configure
+copy config-example.yaml config.yaml
+# Edit config.yaml: set plugins.ebird.api_key to your eBird key
+
+# 2. Install the runtime dependencies into .venv
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+# or, with uv, the exact locked versions:  uv sync --no-dev
+```
+
+Then register it with your client, using the venv's Python and the full
+path to the script (the script finds `config.yaml` and its plugins from any
+working directory):
+
+```json
+{
+  "mcpServers": {
+    "ebird": {
+      "command": "C:\\path\\to\\ebird-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["C:\\path\\to\\ebird-mcp\\scripts\\stdio_server.py"]
+    }
+  }
+}
+```
+
+On macOS/Linux the command is `/path/to/ebird-mcp/.venv/bin/python`. To use
+a config file somewhere else, add
+`"env": {"EBIRD_MCP_CONFIG_FILE": "/path/to/config.yaml"}`.
+
+It is the same server as the hosted one: the same ten tools, protocol
+negotiation and error handling, served through the same request handler.
+Logs go to stderr; stdout carries only protocol messages. `get_taxonomy` is
+answered from a local bundle if you run `python scripts/refresh_taxonomy.py`
+once, and from the live eBird API otherwise.
+
+A stdio-only client that should use the **hosted** endpoint instead (no
+eBird key of your own) can go through a generic bridge such as
+`npx mcp-remote https://ebird.codeforanchorage.org/mcp`.
+
+## Quickstart — local HTTP server (development)
 
 ```powershell
 # 1. Configure
@@ -169,6 +232,8 @@ copies of the same ten tools. Either way, restart Claude Code (or run
 # Prod
 ./scripts/deploy.sh --environment prod
 ```
+
+Commit before you deploy: the script refuses a working tree with uncommitted changes, so that what is live always matches a commit (`--allow-dirty` overrides, for emergencies).
 
 The script will:
 1. Validate that exactly one plugin is enabled and that the eBird key is set.
@@ -233,8 +298,6 @@ logging:
 - **MCP protocol versions.** Negotiated per the spec — `2024-11-05` through `2025-11-25` are supported (`core/mcp_server.py::SUPPORTED_PROTOCOL_VERSIONS`); append newer revisions to that tuple as they ship, after checking their transport requirements against `server/http_handler.py`.
 
 ## Cost
-Commit before you deploy: the script refuses a working tree with uncommitted changes, so that what is live always matches a commit (`--allow-dirty` overrides, for emergencies).
-
 
 At AWS pricing as of mid-2026, with the default `prod.tfvars` settings (`api_quota_limit = 50000`, `lambda_reserved_concurrency = 50`):
 

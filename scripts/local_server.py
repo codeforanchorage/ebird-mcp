@@ -35,34 +35,16 @@ project_root = Path(__file__).parent.parent.resolve()
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-# Which config the server runs on. Resolved BEFORE the handler is imported,
-# and handed to it through OPENCONTEXT_CONFIG (which accepts a YAML path as
-# well as the JSON Terraform injects), so there is exactly one answer.
-#
-# This used to be read here for the logging level only, while the handler
-# went on loading ./config.yaml by itself: EBIRD_MCP_CONFIG_FILE looked
-# honoured -- the server started, the log level changed -- and every
-# request was still served from the other file, API key and all.
-#
-# Precedence: OPENCONTEXT_CONFIG if already set (same as prod), then
-# EBIRD_MCP_CONFIG_FILE, then config.yaml at the repo root -- NOT the
-# process CWD, so the script works from any directory.
-_config_path = os.path.abspath(
-    os.environ.get("EBIRD_MCP_CONFIG_FILE", str(project_root / "config.yaml"))
-)
-# The core discovers plugins relative to the CWD (plugins/, custom_plugins/),
-# so run from the repo root wherever the script was launched from. Done
-# AFTER resolving the config path above, so a relative
-# EBIRD_MCP_CONFIG_FILE still means relative to where the user typed it.
-os.chdir(project_root)
-if not os.environ.get("OPENCONTEXT_CONFIG"):
-    if not os.path.isfile(_config_path):
-        raise SystemExit(
-            f"Config file not found: {_config_path}\n"
-            f"Copy config-example.yaml to config.yaml, or point "
-            f"EBIRD_MCP_CONFIG_FILE at one."
-        )
-    os.environ["OPENCONTEXT_CONFIG"] = _config_path
+_scripts_dir = str(Path(__file__).parent.resolve())
+if _scripts_dir not in sys.path:
+    sys.path.insert(0, _scripts_dir)
+
+from _local_config import use_local_config  # noqa: E402
+
+# Which config the server runs on: resolved BEFORE the handler is imported.
+# Precedence and the reasons for it are in scripts/_local_config.py, shared
+# with scripts/stdio_server.py.
+use_local_config(project_root)
 
 from aiohttp import web  # noqa: E402
 
