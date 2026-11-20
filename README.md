@@ -60,7 +60,7 @@ The public endpoint is rate-limited (currently 50,000 requests/day, 20 rps susta
 - **10 tools** covering recent observations, notable rarities, nearby observations (with species filters), hotspots, nearby hotspots, taxonomy, and species forms — full table below.
 - **Civic-AI response design** — every response carries provenance (the upstream eBird URL, the parameters actually sent, a retrieved-at timestamp) plus epistemic caveats that keep LLMs honest about sparse data: absence-of-evidence framing, single-observer provenance, sampling-size warnings, notable-is-local rarity, taxonomic ambiguity.
 - **Sized for LLM context windows** — `maxResults` caps at 1,000 per call; result sets above 20 records render as a compact table instead of verbose blocks; a 200 KB response ceiling truncates at a record boundary with an explicit notice, never silently.
-- **AWS Lambda + API Gateway REST + WAFv2** — per-IP rate limiting, daily quota, CloudWatch alarms (Lambda errors, throttles, p95 duration, API Gateway 4xx/5xx probing), X-Ray tracing, JSON access logs.
+- **AWS Lambda + API Gateway REST + WAFv2** — per-IP rate limiting, daily quota, CloudWatch alarms (Lambda errors, throttles, p95 duration, API Gateway 5xx), X-Ray tracing, JSON access logs.
 - **One Terraform apply** — `./scripts/deploy.sh --environment prod` builds the deployment zip, plans, prompts, and applies.
 - **Stateless and horizontally scalable** — `Mcp-Session-Id` is for log correlation only; no per-session storage.
 - **Hard cost ceiling** — default `api_quota_limit` in `prod.tfvars` is 50k requests/day, capping worst-case AWS spend around $25/month even under a denial-of-wallet attack.
@@ -81,9 +81,14 @@ Claude / MCP client
                           -> plugins.ebird.ebird_client.EBirdClient -> api.ebird.org
 ```
 
-The hand-rolled JSON-RPC dispatcher implements MCP `initialize`, `tools/list`, `tools/call`, `ping`, and `notifications/initialized`. No MCP SDK; no Lambda Web Adapter; no SSE. Each Lambda invocation handles one request/response cycle. `Mcp-Session-Id` is generated on initialize and echoed back for log correlation only — the server is stateless, and clients may skip `initialize` entirely and call `tools/*` directly, as newer spec revisions allow.
+`core.*` and `server.*` come from the [`opencontext-core`](https://github.com/codeforanchorage/opencontext-core) package, shared by every Code for Anchorage MCP server; this repo contributes the eBird plugin. The dispatcher is hand-rolled JSON-RPC: no MCP SDK, no Lambda Web Adapter, no SSE. Each Lambda invocation handles one request/response cycle, and the server is stateless.
 
-Protocol version is negotiated per the spec: the server supports every revision from `2024-11-05` through `2025-11-25` and echoes the client's requested version when it's supported, otherwise answers with the newest it knows. Streamable HTTP transport MUSTs are enforced in `server/http_handler.py`: requests with an Origin header outside the allowlist get 403, an unsupported `MCP-Protocol-Version` header gets 400 (absent is fine), and JSON-RPC batch arrays get 400 (batching was removed from the spec in 2025-06-18). `initialize` also returns an `instructions` field — an LLM-facing usage guide sourced from the plugin's `get_instructions()`.
+It serves two generations of the protocol, chosen per request:
+
+- **Legacy, `2024-11-05` through `2025-11-25`** — the `initialize` handshake, then `tools/list`, `tools/call`, `ping` and `notifications/initialized`. The server echoes the client's requested version when it is one of these, otherwise answers with the newest of them. `Mcp-Session-Id` is minted on `initialize` and echoed for log correlation only; clients may skip `initialize` and call `tools/*` directly. `initialize` also returns an `instructions` field — an LLM-facing usage guide sourced from the plugin's `get_instructions()`.
+- **Modern, `2026-07-28`** — no handshake and no session. A request names its version in `params._meta`, `server/discover` replaces `initialize`, and every result carries `resultType` and the server's identity.
+
+Streamable HTTP transport rules are enforced in the shared handler: requests with an Origin header outside the allowlist get 403, an `MCP-Protocol-Version` header naming a version the server does not implement gets 400 (absent is fine), and JSON-RPC batch arrays get 400 (batching was removed from the spec in 2025-06-18).
 
 ## Repo layout
 
@@ -183,7 +188,7 @@ python -m venv .venv
 pip install -r requirements-dev.txt
 
 # 3. Run the unit tests (no network — upstream calls are stubbed)
-python -m unittest discover tests
+python -m pytest tests
 
 # 4. Run locally
 python scripts/local_server.py
@@ -256,20 +261,20 @@ plugins:
     enabled: true
     api_key: "REPLACE_ME"
     base_url: "https://api.ebird.org/v2"
-    timeout: 30
+    timeout: 20              # upstream HTTP timeout; must stay under lambda_timeout
     default_max_results: 100
     default_back: 14
 aws:
   region: "us-west-2"
   lambda_name: "ebird-mcp"
   lambda_memory: 512
-  lambda_timeout: 30
+  lambda_timeout: 28         # must stay under API Gateway's fixed 29s
 logging:
   level: "INFO"
   format: "json"
 ```
 
-> The eBird API key lives in `config.yaml` and is visible to anyone with `lambda:GetFunctionConfiguration` on the function. Acceptable for a low-cost API key; if you want stronger isolation, switch the `OPENCONTEXT_CONFIG` env var for an SSM `SecureString` lookup in `server/http_handler.py::_load_config` and grant the Lambda role `ssm:GetParameter`.
+> The eBird API key lives in `config.yaml` and is visible to anyone with `lambda:GetFunctionConfiguration` on the function. Acceptable for a low-cost API key; if you want stronger isolation, switch the `OPENCONTEXT_CONFIG` env var for an SSM `SecureString` lookup in `server/http_handler.py::_load_config` (in the `opencontext-core` package) and grant the Lambda role `ssm:GetParameter`.
 
 ## Tools
 
@@ -289,13 +294,13 @@ logging:
 ## Operational notes
 
 - **Stateless.** `Mcp-Session-Id` is for log correlation; the server stores no per-session state. Horizontally scalable.
-- **CORS / Origin validation.** The Lambda's `UniversalHTTPHandler` allowlist accepts `https://claude.ai`, `https://claude.com`, `https://console.anthropic.com`, and the MCP Inspector on `localhost:6274`. Browser requests from any other Origin get 403; non-browser clients (including claude.ai's backend connector, which sends no Origin header) are unaffected. Edit `server/http_handler.py::ALLOWED_ORIGINS` to add more.
-- **Rate limits.** Defaults in `prod.tfvars`: WAF 50 req/IP per 5 min (sized against the upstream eBird 1000-calls/day quota, not AWS capacity), API GW 20 rps sustained / 40 burst / 50,000 per day. Tune for your traffic.
+- **CORS / Origin validation.** The Lambda's `UniversalHTTPHandler` allowlist accepts `https://claude.ai`, `https://claude.com`, `https://console.anthropic.com`, and the MCP Inspector on `localhost:6274`. Browser requests from any other Origin get 403; non-browser clients (including claude.ai's backend connector, which sends no Origin header) are unaffected. To change the list, set `server_allowed_origins` in `config.yaml` (it replaces the default list, so include every origin you want).
+- **Rate limits.** Defaults in `prod.tfvars`: WAF 50 req/IP per 5 min (sized against the upstream eBird 1000-calls/day quota, not AWS capacity), API GW 20 rps sustained / 40 burst / 50,000 per day. Tune for your traffic. Code for Anchorage's own instance sets `use_shared_waf = true`, which attaches a web ACL shared by its whole MCP fleet; the per-IP limit for that instance is then set in the `mcp-stats` repo, not here. Leave `use_shared_waf` false to get a dedicated ACL governed by `waf_rate_limit_per_5min`.
 - **Input validation, in two layers.** `regionCode`/`speciesCode`/`locale` flow into upstream URL paths, so the plugin regex-validates them before any URL is constructed (`plugins/ebird/plugin.py::_clamp_and_validate`, pinned by `tests/test_input_validation.py`). On prod, the WAF's managed rule sets (`CommonRuleSet`, `KnownBadInputs`) independently 403 traversal-shaped payloads at the edge before they reach the Lambda. Numeric args (`back`, `dist`, `maxResults`) are clamped into valid ranges, and the **effective** values are echoed in the response's `Query:` line so callers always see what actually ran.
 - **Response-size controls.** `maxResults` caps at 1,000 per call (eBird itself accepts 10,000, but that renders to 3+ MB of text no client can use). Result sets above 20 records switch from the readable per-record block format to a compact pipe-delimited table, and a 200 KB body ceiling truncates at a record boundary with an explicit `RESPONSE SIZE CEILING` notice.
 - **Bundled taxonomy.** The deploy script bakes the full eBird taxonomy into the Lambda package; `get_taxonomy` calls with `locale=en` / `fmt=json` are served from the bundle instead of the live API. This is the single biggest saver against the 1000-calls/day eBird quota. Non-English locales and CSV fall through to the live API.
 - **Cold-start cleanup.** The Lambda adapter shuts down the plugin manager after every invocation to avoid `"Event loop is closed"` errors with httpx. This means each invocation re-initializes the eBird client. At Lambda concurrency this is fine; if cold-starts become a problem, keep the client at module scope and remove the shutdown in `_run_with_cleanup`.
-- **MCP protocol versions.** Negotiated per the spec — `2024-11-05` through `2025-11-25` are supported (`core/mcp_server.py::SUPPORTED_PROTOCOL_VERSIONS`); append newer revisions to that tuple as they ship, after checking their transport requirements against `server/http_handler.py`.
+- **MCP protocol versions.** `2024-11-05` through `2025-11-25` (legacy) and `2026-07-28` (modern) are served; see Architecture above. The version lists live in the `opencontext-core` package (`core/mcp_server.py`), so a new revision is added there and arrives here by moving the pin in `requirements.txt` and `pyproject.toml`, then `uv lock`.
 
 ## Cost
 
