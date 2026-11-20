@@ -2,13 +2,18 @@
 #
 # No new data is captured — everything here reads the existing access logs
 # (aws_cloudwatch_log_group.api_gateway_access) and Lambda logs
-# (aws_cloudwatch_log_group.lambda_logs). The session ID is minted on every
-# `initialize` in server/http_handler.py; the access log format is defined in
-# terraform/aws/access_logs.tf.
+# (aws_cloudwatch_log_group.lambda_logs). The access log format is defined
+# in terraform/aws/access_logs.tf.
 #
 # Caveats baked into the queries below:
-#   - "sessions" is per-connection (Mcp-Session-Id), not per-conversation.
-#     Clients reconnect routinely; expect overcounting.
+#   - "sessions" counts legacy `initialize` REQUESTS, not conversations.
+#     Clients reconnect routinely (overcount), claude.ai caches the
+#     handshake (undercount), and a modern-era (2026-07-28) client never
+#     sends initialize at all. The mcp-stats fleet probe initializes about
+#     85 times a day and is excluded by clientInfo.name.
+#   - Request and response records BOTH carry jsonrpc_method. Only the
+#     request record has `is_notification`, so `ispresent(is_notification)`
+#     is what keeps a count from being doubled.
 #   - "unique clients" uses (sourceIp, userAgent) as a best-effort proxy.
 #     Real user counts would require auth (see Tier 4 in the design notes).
 
@@ -25,9 +30,9 @@ resource "aws_cloudwatch_query_definition" "sessions_per_day" {
   log_group_names = [local.lambda_log_group]
 
   query_string = <<-EOT
-    fields @timestamp, mcp_session_id, jsonrpc_method
-    | filter jsonrpc_method = "initialize" and ispresent(mcp_session_id)
-    | stats count_distinct(mcp_session_id) as sessions by bin(1d)
+    fields @timestamp, jsonrpc_method
+    | filter jsonrpc_method = "initialize" and ispresent(is_notification) and not (jsonrpc_params.clientInfo.name = "mcp-fleet-probe")
+    | stats count(*) as sessions by bin(1d)
     | sort @timestamp asc
   EOT
 }
@@ -54,7 +59,7 @@ resource "aws_cloudwatch_query_definition" "mcp_client_breakdown" {
     fields @timestamp,
            jsonrpc_params.clientInfo.name as client,
            jsonrpc_params.clientInfo.version as version
-    | filter jsonrpc_method = "initialize"
+    | filter jsonrpc_method = "initialize" and ispresent(is_notification)
     | stats count(*) as initializes by client, version
     | sort initializes desc
   EOT
@@ -105,15 +110,15 @@ resource "aws_cloudwatch_dashboard" "usage" {
         width  = 12
         height = 6
         properties = {
-          title  = "Sessions per day (distinct Mcp-Session-Id on initialize)"
+          title  = "Sessions per day (initialize requests, fleet probe excluded)"
           region = var.aws_region
           view   = "timeSeries"
           stacked = false
           query = join("\n", [
             "SOURCE '${local.lambda_log_group}'",
-            "| fields @timestamp, mcp_session_id, jsonrpc_method",
-            "| filter jsonrpc_method = \"initialize\" and ispresent(mcp_session_id)",
-            "| stats count_distinct(mcp_session_id) as sessions by bin(1d)",
+            "| fields @timestamp, jsonrpc_method",
+            "| filter jsonrpc_method = \"initialize\" and ispresent(is_notification) and not (jsonrpc_params.clientInfo.name = \"mcp-fleet-probe\")",
+            "| stats count(*) as sessions by bin(1d)",
             "| sort @timestamp asc",
           ])
         }
@@ -151,7 +156,7 @@ resource "aws_cloudwatch_dashboard" "usage" {
           query = join("\n", [
             "SOURCE '${local.lambda_log_group}'",
             "| fields jsonrpc_params.clientInfo.name as client",
-            "| filter jsonrpc_method = \"initialize\"",
+            "| filter jsonrpc_method = \"initialize\" and ispresent(is_notification)",
             "| stats count(*) as initializes by client",
             "| sort initializes desc",
           ])
